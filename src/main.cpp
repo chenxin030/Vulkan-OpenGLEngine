@@ -1,5 +1,4 @@
-﻿#include <GLFW/glfw3.h>
-#include <iostream>
+﻿#include <iostream>
 #include "vulkanTools.h"
 #include <stdexcept>
 #include <cstdlib>
@@ -15,7 +14,6 @@ static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, i
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GLFW_TRUE);
 }
-
 int main()
 {
     glfwSetErrorCallback(ErrorCallback);
@@ -39,14 +37,15 @@ int main()
         glfwSetKeyCallback(window, KeyCallback);
 
         VulkanTools vk(window);
-        vk.init();
+        vk.Init();
 
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            vk.DrawFrame();
         }
 
-        vk.cleanup();
+        vk.Cleanup();
     }
     catch (const std::exception& e) {
         std::cerr << "fatal: " << e.what() << std::endl;

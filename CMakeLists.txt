@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(Rebuild
     VERSION 0.1.0
-    DESCRIPTION "From-scratch rebuild of the mini engine - D4: Vulkan instance, layers, surface, device"
+    DESCRIPTION "From-scratch rebuild of the mini engine - D5/D6: swap chain, render pass, shaders"
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -26,12 +26,52 @@ FetchContent_Declare(glfw
     GIT_SHALLOW    TRUE)
 
 FetchContent_MakeAvailable(glfw)
+
+if(Vulkan_GLSLC_EXECUTABLE)
+    set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
+else()
+    find_program(GLSLC_EXECUTABLE glslc
+        HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+endif()
+
+if(NOT GLSLC_EXECUTABLE)
+    message(FATAL_ERROR
+        "glslc was not found. Install the Vulkan SDK from https://vulkan.lunarg.com, "
+        "make sure the VULKAN_SDK environment variable is set, then re-run CMake.")
+endif()
+
+set(SHADER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+file(MAKE_DIRECTORY "${SHADER_OUTPUT_DIR}")
+
+set(SHADER_NAMES
+    triangle.vert
+    triangle.frag)
+
+set(SHADER_SPIRV_FILES)
+foreach(shader_name IN LISTS SHADER_NAMES)
+    set(spirv_path "${SHADER_OUTPUT_DIR}/${shader_name}.spv")
+    add_custom_command(
+        OUTPUT  "${spirv_path}"
+        COMMAND "${GLSLC_EXECUTABLE}" "${SHADER_SOURCE_DIR}/${shader_name}" -o "${spirv_path}"
+        DEPENDS "${SHADER_SOURCE_DIR}/${shader_name}"
+        COMMENT "Compiling ${shader_name} -> SPIR-V"
+        VERBATIM)
+    list(APPEND SHADER_SPIRV_FILES "${spirv_path}")
+endforeach()
+
+add_custom_target(RebuildShaders ALL DEPENDS ${SHADER_SPIRV_FILES})
 add_executable(Rebuild
     src/vulkanTools.cpp
     src/main.cpp)
 
+add_dependencies(Rebuild RebuildShaders)
+
 target_include_directories(Rebuild PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+target_compile_definitions(Rebuild PRIVATE
+    SHADER_DIR="${SHADER_OUTPUT_DIR}")
 
 target_link_libraries(Rebuild PRIVATE
     glfw
