@@ -27,7 +27,6 @@ int main()
     GLFWwindow* window = nullptr;
     int exitCode = EXIT_SUCCESS;
 
-    VulkanTools vk;
     try {
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
         glfwWindowHint(GLFW_CENTER_CURSOR, GLFW_TRUE);
@@ -39,6 +38,7 @@ int main()
             throw std::runtime_error("ERROR: GLFW window create");
         glfwSetKeyCallback(window, KeyCallback);
 
+        VulkanTools vk(window);
         vk.init();
 
         while (!glfwWindowShouldClose(window))
@@ -46,13 +46,13 @@ int main()
             glfwPollEvents();
         }
 
+        vk.cleanup();
     }
     catch (const std::exception& e) {
         std::cerr << "fatal: " << e.what() << std::endl;
         exitCode = EXIT_FAILURE;
     }
 
-    vk.cleanup();
     if (window != nullptr) { glfwDestroyWindow(window); }
     glfwTerminate();
     return exitCode;
