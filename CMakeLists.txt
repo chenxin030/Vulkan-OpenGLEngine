@@ -25,7 +25,12 @@ FetchContent_Declare(glfw
     GIT_TAG        3.4
     GIT_SHALLOW    TRUE)
 
-FetchContent_MakeAvailable(glfw)
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.91.5
+    GIT_SHALLOW    TRUE)
+
+FetchContent_MakeAvailable(glfw imgui)
 
 if(Vulkan_GLSLC_EXECUTABLE)
     set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
@@ -61,14 +66,25 @@ foreach(shader_name IN LISTS SHADER_NAMES)
 endforeach()
 
 add_custom_target(RebuildShaders ALL DEPENDS ${SHADER_SPIRV_FILES})
+set(IMGUI_SOURCES
+    "${imgui_SOURCE_DIR}/imgui.cpp"
+    "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+    "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+    "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
+
 add_executable(Rebuild
     src/vulkanTools.cpp
-    src/main.cpp)
+    src/main.cpp
+    ${IMGUI_SOURCES})
 
 add_dependencies(Rebuild RebuildShaders)
 
 target_include_directories(Rebuild PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${imgui_SOURCE_DIR}"
+    "${imgui_SOURCE_DIR}/backends")
 
 target_compile_definitions(Rebuild PRIVATE
     SHADER_DIR="${SHADER_OUTPUT_DIR}")
@@ -81,4 +97,5 @@ if(MSVC)
     target_compile_options(Rebuild PRIVATE /utf-8)
 
     target_compile_options(Rebuild PRIVATE /W4)
+    set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")
 endif()
