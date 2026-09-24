@@ -1,10 +1,11 @@
 ﻿#pragma once
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <optional>
-
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
+#include <string>
 
 #include <glm/glm.hpp>
 
@@ -33,14 +34,13 @@ public:
 	static constexpr uint32_t kMaxFramesInFlight = 2;
 
 	VulkanTools(GLFWwindow* window) : m_window(window) {
-		glfwSetWindowUserPointer(m_window, this);
 	}
-	~VulkanTools() { Cleanup(); }
+	~VulkanTools() = default;
 	void Init();
 	void Cleanup();
 	void WaitIdle();
 	void DrawFrame();
-
+	
 private:
 
 	// one-time initialisation
@@ -68,7 +68,14 @@ private:
 	void CleanupSwapChain();
 	void RecreateSwapChain();
 
+	// per frame
 	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
+
+	// debug overlay
+	void InitImGui();
+	void InitImGuiVulkanBackend();
+	void ShutdownImGui();
+	void BuildImGuiFrame();
 
 	// helper
 	std::vector<const char*> GetRequiredExtensions();
@@ -103,10 +110,10 @@ private:
 	VkDevice m_device = VK_NULL_HANDLE;
 	VkQueue m_graphicsQueue = VK_NULL_HANDLE;
 	VkQueue m_presentQueue = VK_NULL_HANDLE;
+	std::string m_deviceName;
 
 	// resources sized to the swapchain
 	VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
-	SwapChainSupportDetails m_swapChainSupport;
 	std::vector<VkImage> m_swapChainImages;
 	VkFormat m_swapChainImageFormat = VK_FORMAT_UNDEFINED;
 	VkExtent2D m_swapChainExtent{};
@@ -129,6 +136,9 @@ private:
 	std::vector<VkSemaphore> m_renderFinishedSemaphores;
 
 	uint32_t m_currentFrame = 0;
+
+	VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
+	bool m_imguiInitialized = false;
 
 	const std::vector<const char*> validationLayers = {
 		"VK_LAYER_KHRONOS_validation"

@@ -1,4 +1,9 @@
 ﻿#include "vulkanTools.h"
+
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_vulkan.h>
+
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <iostream>
@@ -76,10 +81,14 @@ void VulkanTools::Init() {
     CreateCommandPool();
     CreateCommandBuffers();
     CreateSyncObjects();
+
+    InitImGui();
 }
 
 void VulkanTools::Cleanup() {
     WaitIdle();
+
+    ShutdownImGui();
 
     if (!m_imageAvailableSemaphores.empty()) {
         for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
@@ -161,6 +170,13 @@ void VulkanTools::DrawFrame() {
     vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
+
+    // 在录制之前先构建 UI，这样命令缓冲区就会使用这一帧的绘制数据。
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    BuildImGuiFrame();
+    ImGui::Render();
 
     RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
 
@@ -333,9 +349,8 @@ void VulkanTools::PickPhysicalDevice() {
 
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
-    std::cout << "[physical device]: " << properties.deviceName << "           [score]: " << highestScore << std::endl;
-    
-    m_swapChainSupport = QuerySwapChainSupport(m_physicalDevice);
+    m_deviceName = properties.deviceName;
+    std::cout << "[physical device]: " << m_deviceName << "           [score]: " << highestScore << std::endl;
 }
 
 void VulkanTools::CreateLogicalDevice() {
@@ -381,16 +396,18 @@ void VulkanTools::CreateLogicalDevice() {
 }
 
 void VulkanTools::CreateSwapChain() {
-    VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(m_swapChainSupport.formats);
-    VkPresentModeKHR presentMode = ChooseSwapPresentMode(m_swapChainSupport.presentModes);
-    VkExtent2D extent = ChooseSwapExtent(m_swapChainSupport.capabilities);
+    const SwapChainSupportDetails support = QuerySwapChainSupport(m_physicalDevice);
 
-    m_minImageCount = m_swapChainSupport.capabilities.minImageCount;
+    VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(support.formats);
+    VkPresentModeKHR presentMode = ChooseSwapPresentMode(support.presentModes);
+    VkExtent2D extent = ChooseSwapExtent(support.capabilities);
 
-    uint32_t imageCount = m_swapChainSupport.capabilities.minImageCount + 1;
-    if (m_swapChainSupport.capabilities.maxImageCount > 0 &&
-        imageCount > m_swapChainSupport.capabilities.maxImageCount) {
-        imageCount = m_swapChainSupport.capabilities.maxImageCount;
+    m_minImageCount = support.capabilities.minImageCount;
+
+    uint32_t imageCount = support.capabilities.minImageCount + 1;
+    if (support.capabilities.maxImageCount > 0 &&
+        imageCount > support.capabilities.maxImageCount) {
+        imageCount = support.capabilities.maxImageCount;
     }
 
     VkSwapchainCreateInfoKHR createInfo{};
@@ -422,7 +439,7 @@ void VulkanTools::CreateSwapChain() {
     }
 
     // 跟随平台当前要求的变换，比如移动端可能是旋转90°
-    createInfo.preTransform = m_swapChainSupport.capabilities.currentTransform;
+    createInfo.preTransform = support.capabilities.currentTransform;
     // 不透明，不和其他窗口混合
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     createInfo.presentMode = presentMode;
@@ -473,14 +490,29 @@ void VulkanTools::RecreateSwapChain() {
     CreateDepthResources();
 
     if (m_swapChainImageFormat != previousFormat) {
+        // 顺序很重要：ImGui 的 Vulkan 后端会把渲染通道烘焙到它自己的管线中，
+        // 所以必须在渲染通道被销毁之前关闭它。
+        const bool hadImGuiBackend = m_imguiInitialized;
+        if (hadImGuiBackend) {
+            ImGui_ImplVulkan_Shutdown();
+            m_imguiInitialized = false;
+        }
+
         // 表面格式发生了变化（很少见），让渲染通道和所有以此为基础构建的管线都过时了。
         DestroyPipelineResources();
         CreateRenderPass();
         CreateGraphicsPipeline();
+
+        if (hadImGuiBackend) {
+            InitImGuiVulkanBackend();
+        }
     }
 
     CreateFramebuffers();
 
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_SetMinImageCount(m_minImageCount);
+    }
 }
 
 VkResult VulkanTools::CreateDebugUtilsMessengerEXT(
@@ -1014,10 +1046,127 @@ void VulkanTools::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t im
 
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
+    // ImGui 会把它的绘制命令记录到同一个 renderpass 和 subpass 里;
+    // 这就是为什么后端与渲染过程对象绑定。
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+    }
+
     vkCmdEndRenderPass(commandBuffer);
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
         throw std::runtime_error("failed to record command buffer!");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dear ImGui overlay
+// ---------------------------------------------------------------------------
+
+void VulkanTools::InitImGui()
+{
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplGlfw_InitForVulkan(m_window, true);
+
+    // ImGui 需要一个descriptor pool来存放它的字体图集，且在交换链重建时依然存在。
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100 }
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 100;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+
+    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_imguiDescriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create ImGui descriptor pool!");
+    }
+
+    InitImGuiVulkanBackend();
+}
+
+void VulkanTools::InitImGuiVulkanBackend()
+{
+    const QueueFamilyIndices indices = FindQueueFamilies(m_physicalDevice);
+
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.Instance = m_instance;
+    initInfo.PhysicalDevice = m_physicalDevice;
+    initInfo.Device = m_device;
+    initInfo.QueueFamily = indices.graphicsFamily.value();
+    initInfo.Queue = m_graphicsQueue;
+    initInfo.PipelineCache = VK_NULL_HANDLE;
+    initInfo.DescriptorPool = m_imguiDescriptorPool;
+    initInfo.RenderPass = m_renderPass;
+    initInfo.Subpass = 0;
+    initInfo.MinImageCount = m_minImageCount;
+    initInfo.ImageCount = static_cast<uint32_t>(m_swapChainImages.size());
+    initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.Allocator = nullptr;
+    initInfo.CheckVkResultFn = nullptr;
+    initInfo.UseDynamicRendering = false;
+    // 屏蔽关于小型分配的“最佳实践”验证消息。
+    initInfo.MinAllocationSize = 1024 * 1024;
+
+    if (!ImGui_ImplVulkan_Init(&initInfo)) {
+        throw std::runtime_error("failed to initialize the ImGui Vulkan backend!");
+    }
+
+    m_imguiInitialized = true;
+
+    // 自从 1.91 版本起，后端会自己上传字体图集，所以不再有 command-buffer 参数，
+    // 而且 DestroyFontUploadObjects() 已被 DestroyFontsTexture() 替代（Shutdown() 会处理）。
+    if (!ImGui_ImplVulkan_CreateFontsTexture()) {
+        throw std::runtime_error("failed to create the ImGui font texture!");
+    }
+}
+
+void VulkanTools::ShutdownImGui()
+{
+    if (m_imguiInitialized) {
+        ImGui_ImplVulkan_Shutdown();
+        m_imguiInitialized = false;
+    }
+
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
+        m_imguiDescriptorPool = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanTools::BuildImGuiFrame()
+{
+    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_FirstUseEver);
+
+    ImGui::Begin("Mini Engine - Phase 0");
+
+    // io.Framerate 在第一帧为 0
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.Framerate > 0.0f) {
+        ImGui::Text("Frame: %.2f ms  (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+    }
+    else {
+        ImGui::TextUnformatted("Frame: -- (warming up)");
+    }
+
+    ImGui::Separator();
+    ImGui::Text("GPU: %s", m_deviceName.c_str());
+    ImGui::Text("Swapchain: %u x %u", m_swapChainExtent.width, m_swapChainExtent.height);
+    ImGui::Text("Images: %zu  (min %u)", m_swapChainImages.size(), m_minImageCount);
+    ImGui::Text("Frames in flight: %u", kMaxFramesInFlight);
+    ImGui::Separator();
+    ImGui::End();
 }
 
 VkShaderModule VulkanTools::CreateShaderModule(const std::vector<char>& code) const

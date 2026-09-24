@@ -1,10 +1,11 @@
-﻿#include <iostream>
-#include "vulkanTools.h"
+﻿#include "vulkanTools.h"
+
+#include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 
 // helper
-void ErrorCallback(int error, const char* description)
+void GlfwErrorCallback(int error, const char* description)
 {
     std::cerr << "[glfw] (" << error << ") " << description << std::endl;
 }
@@ -16,7 +17,7 @@ static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, i
 }
 int main()
 {
-    glfwSetErrorCallback(ErrorCallback);
+    glfwSetErrorCallback(GlfwErrorCallback);
     if (!glfwInit()) {
         std::cerr << "ERROR: GLFW init\n";
         return EXIT_FAILURE;
