@@ -53,7 +53,9 @@ set(SHADER_NAMES
     triangle.vert
     triangle.frag
     cube.vert
-    cube.frag)
+    cube.frag
+    cube_mvp.vert
+    cube_mvp.frag)
 
 set(SHADER_SPIRV_FILES)
 foreach(shader_name IN LISTS SHADER_NAMES)

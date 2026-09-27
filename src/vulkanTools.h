@@ -74,7 +74,13 @@ private:
 	void CleanupSwapChain();
 	void RecreateSwapChain();
 
+	void CreateDescriptorSetLayout();
+	void CreateUniformBuffers();
+	void CreateDescriptorPool();
+	void CreateDescriptorSets();
+
 	// per frame
+	void UpdateUniformBuffer(uint32_t frameIndex);
 	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
 
 	// debug overlay
@@ -143,15 +149,23 @@ private:
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 
+	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;;
+	VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;;
+	std::vector<VkDescriptorSet> m_descriptorSets;
+
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
 
 	std::vector<Vertex> m_vertices = BuildCubeVertices();
 	std::vector<uint16_t> m_indices = BuildCubeIndices();
 	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_vertexBufferMemory;
+	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;;
 	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_indexBufferMemory;
+	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;;
+
+	std::vector<VkBuffer> m_uniformBuffers;
+	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
+	std::vector<void*> m_uniformBuffersMapped;
 
 	VkImage m_depthImage = VK_NULL_HANDLE;;
 	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
