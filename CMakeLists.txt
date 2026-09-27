@@ -90,7 +90,9 @@ target_include_directories(Rebuild PRIVATE
     "${imgui_SOURCE_DIR}/backends")
 
 target_compile_definitions(Rebuild PRIVATE
-    SHADER_DIR="${SHADER_OUTPUT_DIR}")
+    SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    GLM_FORCE_RADIANS
+    GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 target_link_libraries(Rebuild PRIVATE
     glfw
