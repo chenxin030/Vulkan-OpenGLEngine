@@ -1,4 +1,4 @@
-﻿#include "vulkanTools.h"
+#include "vulkanTools.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -12,7 +12,6 @@
 #include <set>
 #include <algorithm>
 #include <fstream>
-#include "Vertex.h"
 #include <array>
 
 std::vector<char> ReadFile(const std::string& filename)
@@ -80,6 +79,8 @@ void VulkanTools::Init() {
     CreateFramebuffers();
     CreateCommandPool();
     CreateCommandBuffers();
+    CreateVertexBuffer();
+    CreateIndicesBuffer();
     CreateSyncObjects();
 
     InitImGui();
@@ -104,6 +105,12 @@ void VulkanTools::Cleanup() {
         vkDestroyCommandPool(m_device, m_commandPool, nullptr);
         m_commandPool = VK_NULL_HANDLE;
     }
+
+    vkDestroyBuffer(m_device, m_indexBuffer, nullptr);
+    vkFreeMemory(m_device, m_indexBufferMemory, nullptr);
+
+    vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
+    vkFreeMemory(m_device, m_vertexBufferMemory, nullptr);
 
     CleanupSwapChain();
 
@@ -711,6 +718,20 @@ VkExtent2D VulkanTools::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabil
     return actualExtent;
 }
 
+uint32_t VulkanTools::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    throw std::runtime_error("failed to find suitable memory type!");
+
+}
+
 void VulkanTools::CreateImageViews() {
     m_swapChainImageViews.resize(m_swapChainImages.size());
 
@@ -742,8 +763,8 @@ void VulkanTools::CreateDepthResources() {
 
 void VulkanTools::CreateGraphicsPipeline()
 {
-    const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/triangle.vert.spv");
-    const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/triangle.frag.spv");
+    const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube.vert.spv");
+    const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube.frag.spv");
 
     const VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
     const VkShaderModule fragShaderModule = CreateShaderModule(fragShaderCode);
@@ -767,6 +788,10 @@ void VulkanTools::CreateGraphicsPipeline()
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -1010,6 +1035,48 @@ void VulkanTools::DestroyRenderFinishedSemaphores()
     m_renderFinishedSemaphores.clear();
 }
 
+void VulkanTools::CreateVertexBuffer()
+{
+    VkDeviceSize bufferSize = m_vertices.size() * sizeof(Vertex);
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(m_device, stagingBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, m_vertices.data(), (size_t)bufferSize);
+    vkUnmapMemory(m_device, stagingBufferMemory);
+
+    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_vertexBuffer, m_vertexBufferMemory);
+
+    CopyBuffer(stagingBuffer, m_vertexBuffer, bufferSize);
+
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
+}
+
+void VulkanTools::CreateIndicesBuffer()
+{
+    VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(m_device, stagingBufferMemory, 0, bufferSize, 0, &data);
+    memcpy(data, m_indices.data(), (size_t)bufferSize);
+    vkUnmapMemory(m_device, stagingBufferMemory);
+
+    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexBufferMemory);
+
+    CopyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
+
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
+}
+
 void VulkanTools::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1044,7 +1111,12 @@ void VulkanTools::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t im
     scissor.extent = m_swapChainExtent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    VkBuffer vertexBuffers[] = { m_vertexBuffer };
+    VkDeviceSize offsets[] = { 0 };
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+    vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+    vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
 
     // ImGui 会把它的绘制命令记录到同一个 renderpass 和 subpass 里;
     // 这就是为什么后端与渲染过程对象绑定。
@@ -1283,4 +1355,72 @@ VkImageView VulkanTools::CreateImageView(VkImage image, VkFormat format,
     }
 
     return imageView;
+}
+
+void VulkanTools::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create buffer!");
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(m_device, buffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
+
+    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        throw std::runtime_error("failed to allocate buffer memory!");
+    }
+
+    vkBindBufferMemory(m_device, buffer, bufferMemory, 0);
+}
+
+void VulkanTools::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = m_commandPool;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer;
+    if (vkAllocateCommandBuffers(m_device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+        throw std::runtime_error("failed to allocate a one-time command buffer!");
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        throw std::runtime_error("failed to begin the copy command buffer!");
+    }
+
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = size;
+    vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+    if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+        throw std::runtime_error("failed to end the copy command buffer!");
+    }
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    if (vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit the copy command buffer!");
+    }
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
 }

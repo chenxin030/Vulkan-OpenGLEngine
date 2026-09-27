@@ -51,7 +51,9 @@ file(MAKE_DIRECTORY "${SHADER_OUTPUT_DIR}")
 
 set(SHADER_NAMES
     triangle.vert
-    triangle.frag)
+    triangle.frag
+    cube.vert
+    cube.frag)
 
 set(SHADER_SPIRV_FILES)
 foreach(shader_name IN LISTS SHADER_NAMES)
@@ -77,6 +79,7 @@ set(IMGUI_SOURCES
 add_executable(Rebuild
     src/vulkanTools.cpp
     src/main.cpp
+    src/Scene/CubeMesh.cpp
     ${IMGUI_SOURCES})
 
 add_dependencies(Rebuild RebuildShaders)

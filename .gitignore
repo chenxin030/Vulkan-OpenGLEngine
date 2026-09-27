@@ -12,6 +12,8 @@ bin/
 lib/
 install/
 cmake-build-*/
+notes/
+commit.txt
 
 # CMake 残留
 CMakeCache.txt

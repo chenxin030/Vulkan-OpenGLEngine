@@ -9,6 +9,9 @@
 
 #include <glm/glm.hpp>
 
+#include "scene/Vertex.h"
+#include "scene/CubeMesh.h"
+
 struct PushConstants
 {
 	glm::mat4 model;
@@ -55,6 +58,9 @@ private:
 	void CreateRenderFinishedSemaphores();
 	void DestroyRenderFinishedSemaphores();
 
+	void CreateVertexBuffer();
+	void CreateIndicesBuffer();
+
 	// resources sized to the swapchain
 	void CreateSwapChain();
 	void CreateImageViews();
@@ -96,10 +102,15 @@ private:
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
 		uint32_t mipLevels) const;
 
+	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+
 	SwapChainSupportDetails QuerySwapChainSupport(VkPhysicalDevice device);
 	VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
 	VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) const;
 	VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) const;
+
+	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
 	// member
 	GLFWwindow* m_window;
@@ -127,6 +138,13 @@ private:
 
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
+
+	std::vector<Vertex> m_vertices = BuildCubeVertices();
+	std::vector<uint16_t> m_indices = BuildCubeIndices();
+	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory m_vertexBufferMemory;
+	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory m_indexBufferMemory;
 
 	// 由 vkAcquireNextImageKHR 发出信号，由 vkQueueSubmit 等待。每个正在处理的帧使用一个是安全的，因为该帧的栅栏会保护消费它的提交。
 	std::vector<VkSemaphore> m_imageAvailableSemaphores;
