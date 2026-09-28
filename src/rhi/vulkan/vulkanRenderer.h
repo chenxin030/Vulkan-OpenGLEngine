@@ -9,6 +9,7 @@
 
 #include <glm/glm.hpp>
 
+#include "../Renderer.h"
 #include "scene/Vertex.h"
 #include "scene/CubeMesh.h"
 
@@ -32,17 +33,21 @@ struct SwapChainSupportDetails {
 	std::vector<VkPresentModeKHR> presentModes;
 };
 
-class VulkanTools {
+class VulkanRenderer : public Renderer{
 public:
 	static constexpr uint32_t kMaxFramesInFlight = 2;
 
-	VulkanTools(GLFWwindow* window) : m_window(window) {
-	}
-	~VulkanTools() = default;
-	void Init();
-	void Cleanup();
-	void WaitIdle();
-	void DrawFrame();
+	VulkanRenderer() = default;
+	~VulkanRenderer() override = default;
+
+	VulkanRenderer(const VulkanRenderer&) = delete;
+	VulkanRenderer& operator=(const VulkanRenderer&) = delete;
+
+	virtual void ConfigureWindowHints() const override;
+	virtual void Init(GLFWwindow* window) override;
+	virtual void Cleanup() override;
+	virtual void WaitIdle() override;
+	virtual void DrawFrame() override;
 	
 private:
 
@@ -145,13 +150,22 @@ private:
 	std::vector<VkImageView> m_swapChainImageViews;
 	std::vector<VkFramebuffer> m_swapChainFramebuffers;
 
+	VkImage m_depthImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
+	VkImageView m_depthImageView = VK_NULL_HANDLE;
+
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 
-	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;;
-	VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;;
+	// 场景资源。刻意与 swapchain 大小的那一组分开：这些都不依赖于尺寸，调整大小时不会影响它们。
+	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> m_descriptorSets;
+
+	std::vector<VkBuffer> m_uniformBuffers;
+	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
+	std::vector<void*> m_uniformBuffersMapped;
 
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
@@ -159,17 +173,9 @@ private:
 	std::vector<Vertex> m_vertices = BuildCubeVertices();
 	std::vector<uint16_t> m_indices = BuildCubeIndices();
 	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;;
+	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
 	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;;
-
-	std::vector<VkBuffer> m_uniformBuffers;
-	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
-	std::vector<void*> m_uniformBuffersMapped;
-
-	VkImage m_depthImage = VK_NULL_HANDLE;;
-	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
-	VkImageView m_depthImageView = VK_NULL_HANDLE;;
+	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
 
 	// 由 vkAcquireNextImageKHR 发出信号，由 vkQueueSubmit 等待。每个正在处理的帧使用一个是安全的，因为该帧的栅栏会保护消费它的提交。
 	std::vector<VkSemaphore> m_imageAvailableSemaphores;

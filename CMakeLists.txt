@@ -79,8 +79,9 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
 
 add_executable(Rebuild
-    src/vulkanTools.cpp
+    src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
+    src/rhi/RendererFactory.cpp
     src/Scene/CubeMesh.cpp
     ${IMGUI_SOURCES})
 

@@ -1,6 +1,8 @@
-﻿#include "vulkanTools.h"
+﻿#include "rhi/Renderer.h"
+#include "rhi/RendererFactory.h"
 
-#include <iostream>
+#include <GLFW/glfw3.h>
+
 #include <stdexcept>
 #include <cstdlib>
 
@@ -27,26 +29,22 @@ int main()
     int exitCode = EXIT_SUCCESS;
 
     try {
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-        glfwWindowHint(GLFW_CENTER_CURSOR, GLFW_TRUE);
-        glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-
+        std::unique_ptr<Renderer> renderer = CreateRenderer(GraphicAPIType::VULKAN);
+        renderer->ConfigureWindowHints();
         window = glfwCreateWindow(1600, 900, "Engine", NULL, NULL);
         if (!window)
             throw std::runtime_error("ERROR: GLFW window create");
         glfwSetKeyCallback(window, KeyCallback);
 
-        VulkanTools vk(window);
-        vk.Init();
+        renderer->Init(window);
 
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
-            vk.DrawFrame();
+            renderer->DrawFrame();
         }
-
-        vk.Cleanup();
+        renderer->WaitIdle();
+        renderer->Cleanup();
     }
     catch (const std::exception& e) {
         std::cerr << "fatal: " << e.what() << std::endl;

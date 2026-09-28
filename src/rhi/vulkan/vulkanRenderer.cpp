@@ -1,4 +1,4 @@
-﻿#include "vulkanTools.h"
+﻿#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -73,8 +73,17 @@ std::array<VkVertexInputAttributeDescription, 3> VertexAttributeDescriptions()
     return attributes;
 }
 
+void VulkanRenderer::ConfigureWindowHints() const
+{
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    glfwWindowHint(GLFW_CENTER_CURSOR, GLFW_TRUE);
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+}
 
-void VulkanTools::Init() {
+void VulkanRenderer::Init(GLFWwindow* window) {
+    m_window = window;
+
     CreateInstance();
     SetupDebugMessenger();
     CreateSurface();
@@ -100,7 +109,7 @@ void VulkanTools::Init() {
     InitImGui();
 }
 
-void VulkanTools::Cleanup() {
+void VulkanRenderer::Cleanup() {
     WaitIdle();
 
     ShutdownImGui();
@@ -156,13 +165,13 @@ void VulkanTools::Cleanup() {
     
 }
 
-void VulkanTools::WaitIdle()
+void VulkanRenderer::WaitIdle()
 {
     if (m_device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(m_device);
     }
 }
-void VulkanTools::DrawFrame() {
+void VulkanRenderer::DrawFrame() {
 
     // 轮询帧缓冲区大小而不是使用调整大小回调可以减少动用的部分，而且还能自动处理 DPI 变化。
     int width = 0;
@@ -254,7 +263,7 @@ void VulkanTools::DrawFrame() {
     m_currentFrame = (m_currentFrame + 1) % kMaxFramesInFlight;
 }
 
-void VulkanTools::CreateInstance() {
+void VulkanRenderer::CreateInstance() {
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "Engine";
@@ -295,7 +304,7 @@ void VulkanTools::CreateInstance() {
     }
 }
 
-std::vector<const char*> VulkanTools::GetRequiredExtensions() {
+std::vector<const char*> VulkanRenderer::GetRequiredExtensions() {
     uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions;
     glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -308,7 +317,7 @@ std::vector<const char*> VulkanTools::GetRequiredExtensions() {
     return extensions;
 }
 
-bool VulkanTools::CheckValidationLayerSupport() {
+bool VulkanRenderer::CheckValidationLayerSupport() {
     uint32_t layerCount;
     vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 
@@ -333,7 +342,7 @@ bool VulkanTools::CheckValidationLayerSupport() {
     return true;
 }
 
-void VulkanTools::SetupDebugMessenger() {
+void VulkanRenderer::SetupDebugMessenger() {
 #ifdef NDEBUG
     return;
 #endif
@@ -345,14 +354,14 @@ void VulkanTools::SetupDebugMessenger() {
     }
 }
 
-void VulkanTools::CreateSurface()
+void VulkanRenderer::CreateSurface()
 {
     if (glfwCreateWindowSurface(m_instance, m_window, nullptr, &m_surface) != VK_SUCCESS) {
         throw std::runtime_error("failed to create window surface!");
     }
 }
 
-void VulkanTools::PickPhysicalDevice() {
+void VulkanRenderer::PickPhysicalDevice() {
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
@@ -385,7 +394,7 @@ void VulkanTools::PickPhysicalDevice() {
     std::cout << "[physical device]: " << m_deviceName << "           [score]: " << highestScore << std::endl;
 }
 
-void VulkanTools::CreateLogicalDevice() {
+void VulkanRenderer::CreateLogicalDevice() {
     QueueFamilyIndices indices = FindQueueFamilies(m_physicalDevice);
 
     std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
@@ -427,7 +436,7 @@ void VulkanTools::CreateLogicalDevice() {
     vkGetDeviceQueue(m_device, indices.presentFamily.value(), 0, &m_presentQueue);
 }
 
-void VulkanTools::CreateSwapChain() {
+void VulkanRenderer::CreateSwapChain() {
     const SwapChainSupportDetails support = QuerySwapChainSupport(m_physicalDevice);
 
     VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(support.formats);
@@ -494,13 +503,13 @@ void VulkanTools::CreateSwapChain() {
     CreateRenderFinishedSemaphores();
 }
 
-void VulkanTools::CleanupSwapChain()
+void VulkanRenderer::CleanupSwapChain()
 {
     DestroySwapChainResources();
     DestroyPipelineResources();
 }
 
-void VulkanTools::RecreateSwapChain() {
+void VulkanRenderer::RecreateSwapChain() {
     // 最小化的窗口会显示0x0；阻塞直到它再次有真实大小。
     int width = 0;
     int height = 0;
@@ -547,7 +556,7 @@ void VulkanTools::RecreateSwapChain() {
     }
 }
 
-void VulkanTools::CreateDescriptorSetLayout() {
+void VulkanRenderer::CreateDescriptorSetLayout() {
     VkDescriptorSetLayoutBinding uboLayoutBinding{};
     uboLayoutBinding.binding = 0;
     uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -564,7 +573,7 @@ void VulkanTools::CreateDescriptorSetLayout() {
     }
 }
 
-void VulkanTools::CreateUniformBuffers()
+void VulkanRenderer::CreateUniformBuffers()
 {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
@@ -579,7 +588,7 @@ void VulkanTools::CreateUniformBuffers()
     }
 }
 
-void VulkanTools::CreateDescriptorPool()
+void VulkanRenderer::CreateDescriptorPool()
 {
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -596,7 +605,7 @@ void VulkanTools::CreateDescriptorPool()
     }
 }
 
-void VulkanTools::CreateDescriptorSets() 
+void VulkanRenderer::CreateDescriptorSets() 
 {
     std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight, m_descriptorSetLayout);
     VkDescriptorSetAllocateInfo allocInfo{};
@@ -629,7 +638,7 @@ void VulkanTools::CreateDescriptorSets()
     }
 }
 
-VkResult VulkanTools::CreateDebugUtilsMessengerEXT(
+VkResult VulkanRenderer::CreateDebugUtilsMessengerEXT(
     VkInstance instance,
     const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
@@ -659,7 +668,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return VK_FALSE;
 }
 
-void VulkanTools::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
+void VulkanRenderer::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo) {
     createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
     createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
@@ -667,14 +676,14 @@ void VulkanTools::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateIn
     createInfo.pfnUserCallback = debugCallback;
 }
 
-void VulkanTools::DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
+void VulkanRenderer::DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
     auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
 }
 
-bool VulkanTools::IsDeviceSuitable(VkPhysicalDevice device) {
+bool VulkanRenderer::IsDeviceSuitable(VkPhysicalDevice device) {
 
     QueueFamilyIndices indices = FindQueueFamilies(device);
     bool extensionsSupported = CheckDeviceExtensionSupport(device);
@@ -688,7 +697,7 @@ bool VulkanTools::IsDeviceSuitable(VkPhysicalDevice device) {
     return indices.isComplete() && extensionsSupported && swapChainAdequate;
 }
 
-int VulkanTools::RateDeviceSuitability(VkPhysicalDevice device) {
+int VulkanRenderer::RateDeviceSuitability(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties deviceProperties;
     VkPhysicalDeviceFeatures deviceFeatures;
     vkGetPhysicalDeviceProperties(device, &deviceProperties);
@@ -711,7 +720,7 @@ int VulkanTools::RateDeviceSuitability(VkPhysicalDevice device) {
     return score;
 }
 
-QueueFamilyIndices VulkanTools::FindQueueFamilies(VkPhysicalDevice device) {
+QueueFamilyIndices VulkanRenderer::FindQueueFamilies(VkPhysicalDevice device) {
     QueueFamilyIndices indices;
 
     uint32_t queueFamilyCount = 0;
@@ -738,7 +747,7 @@ QueueFamilyIndices VulkanTools::FindQueueFamilies(VkPhysicalDevice device) {
     return indices;
 }
 
-bool VulkanTools::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
+bool VulkanRenderer::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
     uint32_t extensionCount;
     vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
 
@@ -754,7 +763,7 @@ bool VulkanTools::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
     return requiredExtensions.empty();
 }
 
-SwapChainSupportDetails VulkanTools::QuerySwapChainSupport(VkPhysicalDevice device) {
+SwapChainSupportDetails VulkanRenderer::QuerySwapChainSupport(VkPhysicalDevice device) {
     SwapChainSupportDetails details;
 
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, m_surface, &details.capabilities);
@@ -776,7 +785,7 @@ SwapChainSupportDetails VulkanTools::QuerySwapChainSupport(VkPhysicalDevice devi
     return details;
 }
 
-VkSurfaceFormatKHR VulkanTools::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+VkSurfaceFormatKHR VulkanRenderer::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
     for (const VkSurfaceFormatKHR& availableFormat : availableFormats) {
         if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB &&
             availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -787,7 +796,7 @@ VkSurfaceFormatKHR VulkanTools::ChooseSwapSurfaceFormat(const std::vector<VkSurf
     return availableFormats[0];
 }
 
-VkPresentModeKHR VulkanTools::ChooseSwapPresentMode(
+VkPresentModeKHR VulkanRenderer::ChooseSwapPresentMode(
     const std::vector<VkPresentModeKHR>& availablePresentModes) const
 {
     // Mailbox 最接近“无上限但不丢失”. FIFO 是唯一保证存在的模式，所以它是备用方案。
@@ -800,7 +809,7 @@ VkPresentModeKHR VulkanTools::ChooseSwapPresentMode(
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-VkExtent2D VulkanTools::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) const
+VkExtent2D VulkanRenderer::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) const
 {
     if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
         return capabilities.currentExtent;
@@ -825,7 +834,7 @@ VkExtent2D VulkanTools::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabil
     return actualExtent;
 }
 
-uint32_t VulkanTools::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+uint32_t VulkanRenderer::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
 {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
@@ -839,7 +848,7 @@ uint32_t VulkanTools::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags 
 
 }
 
-void VulkanTools::CreateImageViews() {
+void VulkanRenderer::CreateImageViews() {
     m_swapChainImageViews.resize(m_swapChainImages.size());
 
     for (size_t i = 0; i < m_swapChainImages.size(); ++i) {
@@ -847,13 +856,13 @@ void VulkanTools::CreateImageViews() {
     }
 }
 
-void VulkanTools::CreateDepthResources() {
+void VulkanRenderer::CreateDepthResources() {
     VkFormat depthFormat = FindDepthFormat();
     CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
     m_depthImageView = CreateImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
-void VulkanTools::CreateGraphicsPipeline()
+void VulkanRenderer::CreateGraphicsPipeline()
 {
     const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube_mvp.vert.spv");
     const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube_mvp.frag.spv");
@@ -980,7 +989,7 @@ void VulkanTools::CreateGraphicsPipeline()
     vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 }
 
-void VulkanTools::CreateFramebuffers()
+void VulkanRenderer::CreateFramebuffers()
 {
     m_swapChainFramebuffers.resize(m_swapChainImageViews.size());
 
@@ -1011,7 +1020,7 @@ void VulkanTools::CreateFramebuffers()
 // 故意拆分成两个拆解步骤：仅调整大小会使交换链大小的资源失效，而格式更改则会使渲染通道和所有基于它构建的东西（包括ImGui后端）都失效。
 // ---------------------------------------------------------------------------
 
-void VulkanTools::DestroySwapChainResources()
+void VulkanRenderer::DestroySwapChainResources()
 {
     vkDestroyImageView(m_device, m_depthImageView, nullptr);
     vkDestroyImage(m_device, m_depthImage, nullptr);
@@ -1039,7 +1048,7 @@ void VulkanTools::DestroySwapChainResources()
     m_swapChainImages.clear();
 }
 
-void VulkanTools::DestroyPipelineResources()
+void VulkanRenderer::DestroyPipelineResources()
 {
     if (m_graphicsPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_graphicsPipeline, nullptr);
@@ -1059,7 +1068,7 @@ void VulkanTools::DestroyPipelineResources()
 // Command buffers and synchronisation
 // ---------------------------------------------------------------------------
 
-void VulkanTools::CreateCommandPool() {
+void VulkanRenderer::CreateCommandPool() {
     const QueueFamilyIndices indices = FindQueueFamilies(m_physicalDevice);
 
     VkCommandPoolCreateInfo poolInfo{};
@@ -1073,7 +1082,7 @@ void VulkanTools::CreateCommandPool() {
     }
 }
 
-void VulkanTools::CreateCommandBuffers()
+void VulkanRenderer::CreateCommandBuffers()
 {
     m_commandBuffers.resize(kMaxFramesInFlight);
 
@@ -1088,7 +1097,7 @@ void VulkanTools::CreateCommandBuffers()
     }
 }
 
-void VulkanTools::CreateSyncObjects()
+void VulkanRenderer::CreateSyncObjects()
 {
     m_imageAvailableSemaphores.resize(kMaxFramesInFlight);
     m_inFlightFences.resize(kMaxFramesInFlight);
@@ -1114,7 +1123,7 @@ void VulkanTools::CreateSyncObjects()
 // present 不会被 fence 保护，所以没有什么能告诉我们 present 引擎什么时候完成了读取这个信号量。
 // 比如说有 3 个交换链图像，但只有 2 个帧在飞行中，那么一个信号量可能在它之前的显示还在挂起时就被再次发送信号——VUID - vkQueueSubmit - pSignalSemaphores - 00067 明确禁止。
 // 通过按获取的图像索引来索引就解决了这个问题：能够重新获取图像 i 本身就证明图像 i 的前一次显示已经完成，所以与图像 i 配对的信号量在再次发送信号时一定是未发送状态。
-void VulkanTools::CreateRenderFinishedSemaphores()
+void VulkanRenderer::CreateRenderFinishedSemaphores()
 {
     m_renderFinishedSemaphores.resize(m_swapChainImages.size());
 
@@ -1128,7 +1137,7 @@ void VulkanTools::CreateRenderFinishedSemaphores()
     }
 }
 
-void VulkanTools::DestroyRenderFinishedSemaphores()
+void VulkanRenderer::DestroyRenderFinishedSemaphores()
 {
     for (const VkSemaphore semaphore : m_renderFinishedSemaphores) {
         vkDestroySemaphore(m_device, semaphore, nullptr);
@@ -1136,7 +1145,7 @@ void VulkanTools::DestroyRenderFinishedSemaphores()
     m_renderFinishedSemaphores.clear();
 }
 
-void VulkanTools::CreateVertexBuffer()
+void VulkanRenderer::CreateVertexBuffer()
 {
     VkDeviceSize bufferSize = m_vertices.size() * sizeof(Vertex);
 
@@ -1157,7 +1166,7 @@ void VulkanTools::CreateVertexBuffer()
     vkFreeMemory(m_device, stagingBufferMemory, nullptr);
 }
 
-void VulkanTools::CreateIndicesBuffer()
+void VulkanRenderer::CreateIndicesBuffer()
 {
     VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
 
@@ -1178,7 +1187,7 @@ void VulkanTools::CreateIndicesBuffer()
     vkFreeMemory(m_device, stagingBufferMemory, nullptr);
 }
 
-void VulkanTools::UpdateUniformBuffer(uint32_t frameIndex)
+void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex)
 {
     static auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -1194,7 +1203,7 @@ void VulkanTools::UpdateUniformBuffer(uint32_t frameIndex)
     memcpy(m_uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
 }
 
-void VulkanTools::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
@@ -1255,7 +1264,7 @@ void VulkanTools::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t im
 // Dear ImGui overlay
 // ---------------------------------------------------------------------------
 
-void VulkanTools::InitImGui()
+void VulkanRenderer::InitImGui()
 {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1285,7 +1294,7 @@ void VulkanTools::InitImGui()
     InitImGuiVulkanBackend();
 }
 
-void VulkanTools::InitImGuiVulkanBackend()
+void VulkanRenderer::InitImGuiVulkanBackend()
 {
     const QueueFamilyIndices indices = FindQueueFamilies(m_physicalDevice);
 
@@ -1321,7 +1330,7 @@ void VulkanTools::InitImGuiVulkanBackend()
     }
 }
 
-void VulkanTools::ShutdownImGui()
+void VulkanRenderer::ShutdownImGui()
 {
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_Shutdown();
@@ -1337,7 +1346,7 @@ void VulkanTools::ShutdownImGui()
     }
 }
 
-void VulkanTools::BuildImGuiFrame()
+void VulkanRenderer::BuildImGuiFrame()
 {
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_FirstUseEver);
@@ -1362,7 +1371,7 @@ void VulkanTools::BuildImGuiFrame()
     ImGui::End();
 }
 
-VkShaderModule VulkanTools::CreateShaderModule(const std::vector<char>& code) const
+VkShaderModule VulkanRenderer::CreateShaderModule(const std::vector<char>& code) const
 {
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -1378,7 +1387,7 @@ VkShaderModule VulkanTools::CreateShaderModule(const std::vector<char>& code) co
     return shaderModule;
 }
 
-VkFormat VulkanTools::FindSupportedFormat(const std::vector<VkFormat>& candidates,
+VkFormat VulkanRenderer::FindSupportedFormat(const std::vector<VkFormat>& candidates,
     VkImageTiling tiling,
     VkFormatFeatureFlags features) const
 {
@@ -1397,7 +1406,7 @@ VkFormat VulkanTools::FindSupportedFormat(const std::vector<VkFormat>& candidate
     throw std::runtime_error("failed to find a supported format!");
 }
 
-VkFormat VulkanTools::FindDepthFormat() const
+VkFormat VulkanRenderer::FindDepthFormat() const
 {
     // 首选D32 first, 然后是 depth/stencil 混合格式. 因为不能没有一个能保证在所有驱动都能用，所有保留候选名单
     return FindSupportedFormat(
@@ -1406,7 +1415,7 @@ VkFormat VulkanTools::FindDepthFormat() const
         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
 
-void VulkanTools::CreateRenderPass()
+void VulkanRenderer::CreateRenderPass()
 {
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = m_swapChainImageFormat;
@@ -1464,7 +1473,7 @@ void VulkanTools::CreateRenderPass()
     }
 }
 
-void VulkanTools::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
+void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
 {
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1500,7 +1509,7 @@ void VulkanTools::CreateImage(uint32_t width, uint32_t height, VkFormat format, 
     vkBindImageMemory(m_device, image, imageMemory, 0);
 }
 
-VkImageView VulkanTools::CreateImageView(VkImage image, VkFormat format,
+VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format,
     VkImageAspectFlags aspectFlags, uint32_t mipLevels) const
 {
     VkImageViewCreateInfo viewInfo{};
@@ -1523,7 +1532,7 @@ VkImageView VulkanTools::CreateImageView(VkImage image, VkFormat format,
     return imageView;
 }
 
-void VulkanTools::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)
+void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)
 {
     VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
@@ -1591,7 +1600,7 @@ void VulkanTools::TransitionImageLayout(VkImage image, VkFormat format, VkImageL
     EndSingleTimeCommands(commandBuffer);
 }
 
-void VulkanTools::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
+void VulkanRenderer::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
 {
     VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
     VkBufferImageCopy region{};
@@ -1621,11 +1630,11 @@ void VulkanTools::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t wid
     EndSingleTimeCommands(commandBuffer);
 }
 
-bool VulkanTools::HasStencilComponent(VkFormat format) {
+bool VulkanRenderer::HasStencilComponent(VkFormat format) {
     return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
 }
 
-void VulkanTools::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
@@ -1651,7 +1660,7 @@ void VulkanTools::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMe
     vkBindBufferMemory(m_device, buffer, bufferMemory, 0);
 }
 
-void VulkanTools::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+void VulkanRenderer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
     VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
     VkBufferCopy copyRegion{};
@@ -1661,7 +1670,7 @@ void VulkanTools::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSiz
     EndSingleTimeCommands(commandBuffer);
 }
 
-VkCommandBuffer VulkanTools::BeginSingleTimeCommands() {
+VkCommandBuffer VulkanRenderer::BeginSingleTimeCommands() {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -1682,7 +1691,7 @@ VkCommandBuffer VulkanTools::BeginSingleTimeCommands() {
     return commandBuffer;
 }
 
-void VulkanTools::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
+void VulkanRenderer::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkEndCommandBuffer(commandBuffer);
 
     VkSubmitInfo submitInfo{};
