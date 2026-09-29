@@ -82,7 +82,7 @@ add_executable(Rebuild
     src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
     src/rhi/RendererFactory.cpp
-    src/Scene/CubeMesh.cpp
+    src/scene/CubeMesh.cpp
     ${IMGUI_SOURCES})
 
 add_dependencies(Rebuild RebuildShaders)
