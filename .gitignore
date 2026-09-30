@@ -14,6 +14,7 @@ install/
 cmake-build-*/
 notes/
 commit.txt
+tools/
 
 # CMake 残留
 CMakeCache.txt

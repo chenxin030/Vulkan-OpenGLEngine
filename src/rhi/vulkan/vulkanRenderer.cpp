@@ -17,6 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <scene/Image.h>
 
 struct UniformBufferObject {
     glm::mat4 model;
@@ -93,6 +94,16 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateSwapChain();
     CreateImageViews();
     CreateDepthResources();
+
+    CreateCommandPool();
+    CreateCommandBuffers();
+
+    CreateVertexBuffer();
+    CreateIndicesBuffer();
+    CreateTextureImage();
+    CreateTextureImageView();
+    CreateTextureSampler();
+
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
     CreateDescriptorPool();
@@ -100,10 +111,7 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateRenderPass();
     CreateGraphicsPipeline();
     CreateFramebuffers();
-    CreateCommandPool();
-    CreateCommandBuffers();
-    CreateVertexBuffer();
-    CreateIndicesBuffer();
+
     CreateSyncObjects();
 
     InitImGui();
@@ -145,6 +153,11 @@ void VulkanRenderer::Cleanup() {
     vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
 
     CleanupSwapChain();
+
+    vkDestroySampler(m_device, m_textureSampler, nullptr);
+    vkDestroyImageView(m_device, m_textureImageView, nullptr);
+    vkDestroyImage(m_device, m_textureImage, nullptr);
+    vkFreeMemory(m_device, m_textureImageMemory, nullptr);
 
     if (m_device != VK_NULL_HANDLE) {
         vkDestroyDevice(m_device, nullptr);
@@ -419,6 +432,14 @@ void VulkanRenderer::CreateLogicalDevice() {
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
     VkPhysicalDeviceFeatures deviceFeatures{};
+    deviceFeatures.samplerAnisotropy = VK_TRUE;
+
+    // 填好结构体 ≠ 打开了特性：**必须**把它交给 vkCreateDevice。
+    // IsDeviceSuitable() 里查的是"设备支不支持"，这里才是"我要不要启用"。
+    // 漏掉这一行，samplerAnisotropy 在逻辑设备上始终没开，
+    // 后面 anisotropyEnable = VK_TRUE 就会被验证层判违规（VUID-...-01070）。
+    createInfo.pEnabledFeatures = &deviceFeatures;
+
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
@@ -563,10 +584,21 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
     uboLayoutBinding.descriptorCount = 1;
     uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
+    VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+    samplerLayoutBinding.binding = 1;
+    samplerLayoutBinding.descriptorCount = 1;
+    samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    // 采样只发生在片元着色器里。stageFlags 留空（= 0）是个"沉默"的错：
+    // 只要没有任何 shader 真的碰 binding 1，它就一直不报错 —— 一旦片元采样
+    // 打开，vkCreateGraphicsPipelines 立刻判违规（VUID-...-layout-07988）。
+    samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    samplerLayoutBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &uboLayoutBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
 
     if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_descriptorSetLayout) != VK_SUCCESS) {
         throw std::runtime_error("failed to create descriptor set layout!");
@@ -590,14 +622,16 @@ void VulkanRenderer::CreateUniformBuffers()
 
 void VulkanRenderer::CreateDescriptorPool()
 {
-    VkDescriptorPoolSize poolSize{};
-    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSize.descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight);
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight);
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight);
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = static_cast<uint32_t>(kMaxFramesInFlight);
 
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
@@ -625,16 +659,30 @@ void VulkanRenderer::CreateDescriptorSets()
         bufferInfo.offset = 0;
         bufferInfo.range = sizeof(UniformBufferObject);
 
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = m_descriptorSets[i];
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pBufferInfo = &bufferInfo;
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = m_textureImageView;
+        imageInfo.sampler = m_textureSampler;
 
-        vkUpdateDescriptorSets(m_device, 1, &descriptorWrite, 0, nullptr);
+        std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+
+        descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[0].dstSet = m_descriptorSets[i];
+        descriptorWrites[0].dstBinding = 0;
+        descriptorWrites[0].dstArrayElement = 0;
+        descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrites[0].descriptorCount = 1;
+        descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+        descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[1].dstSet = m_descriptorSets[i];
+        descriptorWrites[1].dstBinding = 1;
+        descriptorWrites[1].dstArrayElement = 0;
+        descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[1].descriptorCount = 1;
+        descriptorWrites[1].pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
     }
 }
 
@@ -694,7 +742,10 @@ bool VulkanRenderer::IsDeviceSuitable(VkPhysicalDevice device) {
         swapChainAdequate = !support.formats.empty() && !support.presentModes.empty();
     }
 
-    return indices.isComplete() && extensionsSupported && swapChainAdequate;
+    VkPhysicalDeviceFeatures supportedFeatures;
+    vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
+
+    return indices.isComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy;
 }
 
 int VulkanRenderer::RateDeviceSuitability(VkPhysicalDevice device) {
@@ -865,7 +916,15 @@ void VulkanRenderer::CreateDepthResources() {
 void VulkanRenderer::CreateGraphicsPipeline()
 {
     const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube_mvp.vert.spv");
-    const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube_mvp.frag.spv");
+    // 片元换成会采样贴图的那一份：cube_mvp.frag 收了 fragTexCoord 却没用它
+    // （outColor = vec4(fragColor, 1.0)），在它之后贴图永远不会出现。
+    //
+    // 顶点暂时不跟着换成 mesh.vert：仓库里那份来自参考工程**更晚的提交**（D25），
+    // model 已经搬进 push constant、UBO 只剩 {view, proj}，和现在的
+    // UniformBufferObject{model, view, proj} 对不上，而管线里也没有 push constant
+    // range —— 切过去画面会整体错位。两份 shader 的 in/out 位置一致，混用是安全的；
+    // 等 D25 搬 push constant 时再一起切。
+    const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/mesh.frag.spv");
 
     const VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
     const VkShaderModule fragShaderModule = CreateShaderModule(fragShaderCode);
@@ -1185,6 +1244,77 @@ void VulkanRenderer::CreateIndicesBuffer()
 
     vkDestroyBuffer(m_device, stagingBuffer, nullptr);
     vkFreeMemory(m_device, stagingBufferMemory, nullptr);
+}
+void VulkanRenderer::CreateTextureImage() {
+    const std::string path = std::string(ASSET_DIR) + "/checkerboard.ppm";
+    const Image image = LoadImage(path);
+    if (!image.IsValid()) {
+        throw std::runtime_error("decoded image is empty: " + path);
+    }
+    
+    m_textureWidth = image.width;
+    m_textureHeight = image.height;
+
+    m_textureMipLevels = 1;
+
+    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(image.width) *
+        static_cast<VkDeviceSize>(image.height) * 4;
+
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(m_device, stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, image.pixels.data(), static_cast<size_t>(imageSize));
+    vkUnmapMemory(m_device, stagingBufferMemory);
+
+    CreateImage(image.width, image.height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
+
+    const VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+    TransitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    CopyBufferToImage(stagingBuffer, m_textureImage, static_cast<uint32_t>(m_textureWidth), static_cast<uint32_t>(m_textureHeight));
+
+    TransitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
+}
+
+void VulkanRenderer::CreateTextureImageView()
+{
+    m_textureImageView = CreateImageView(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, m_textureMipLevels);
+}
+
+void VulkanRenderer::CreateTextureSampler()
+{
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+
+    if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_textureSampler) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create texture sampler!");
+    }
 }
 
 void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex)

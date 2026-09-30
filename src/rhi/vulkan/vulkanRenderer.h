@@ -78,11 +78,16 @@ private:
 	void DestroyPipelineResources();
 	void CleanupSwapChain();
 	void RecreateSwapChain();
+	// ----------------------------------------
 
 	void CreateDescriptorSetLayout();
 	void CreateUniformBuffers();
 	void CreateDescriptorPool();
 	void CreateDescriptorSets();
+
+	void CreateTextureImage();
+	void CreateTextureImageView();
+	void CreateTextureSampler();
 
 	// per frame
 	void UpdateUniformBuffer(uint32_t frameIndex);
@@ -176,6 +181,14 @@ private:
 	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
 	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
+
+	VkImage m_textureImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_textureImageMemory;
+	VkImageView m_textureImageView = VK_NULL_HANDLE;
+	VkSampler m_textureSampler = VK_NULL_HANDLE;
+	uint32_t m_textureWidth = 0;
+	uint32_t m_textureHeight = 0;
+	uint32_t m_textureMipLevels = 1;
 
 	// 由 vkAcquireNextImageKHR 发出信号，由 vkQueueSubmit 等待。每个正在处理的帧使用一个是安全的，因为该帧的栅栏会保护消费它的提交。
 	std::vector<VkSemaphore> m_imageAvailableSemaphores;

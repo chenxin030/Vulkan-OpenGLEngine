@@ -30,7 +30,11 @@ FetchContent_Declare(imgui
     GIT_TAG        v1.91.5
     GIT_SHALLOW    TRUE)
 
-FetchContent_MakeAvailable(glfw imgui)
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20)
+
+FetchContent_MakeAvailable(glfw imgui stb)
 
 if(Vulkan_GLSLC_EXECUTABLE)
     set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
@@ -55,7 +59,11 @@ set(SHADER_NAMES
     cube.vert
     cube.frag
     cube_mvp.vert
-    cube_mvp.frag)
+    cube_mvp.frag
+    cube_tex.vert
+    cube_tex.frag
+    mesh.vert
+    mesh.frag)
 
 set(SHADER_SPIRV_FILES)
 foreach(shader_name IN LISTS SHADER_NAMES)
@@ -83,17 +91,34 @@ add_executable(Rebuild
     src/main.cpp
     src/rhi/RendererFactory.cpp
     src/scene/CubeMesh.cpp
+   src/scene/Image.cpp
     ${IMGUI_SOURCES})
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/scene/Image.cpp")
+    target_sources(Rebuild PRIVATE src/scene/Image.cpp)
+else()
+    message(STATUS "src/scene/Image.cpp not present yet - texture loading (D18/R4-a) is not compiled in")
+endif()
 
 add_dependencies(Rebuild RebuildShaders)
 
+if(WIN32)
+    add_custom_target(DemoTexture
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-demo-texture.ps1"
+        COMMENT "Generating the demo texture into assets/"
+        VERBATIM)
+endif()
+
 target_include_directories(Rebuild PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${stb_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends")
 
 target_compile_definitions(Rebuild PRIVATE
     SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE)
 

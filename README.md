@@ -27,8 +27,10 @@ cmake --build build --config Debug
 .\build\Debug\Rebuild.exe
 ```
 
-- 第一次配置会联网拉 GLFW（**GitHub 要开代理**），之后缓存在 `build\_deps`
+- 第一次配置会联网拉 GLFW / ImGui / stb（**GitHub 要开代理**），之后缓存在 `build\_deps`
 - 报奇怪的错就删 `build\CMakeCache.txt` 和 `build\CMakeFiles` 再配置 —— **千万别删 `build\_deps`**
+- 贴图是**生成**的（`assets/` 已忽略），需要时手动生成一次：
+  `cmake --build build --target DemoTexture` → `assets\checkerboard.ppm`
 
 ---
 
