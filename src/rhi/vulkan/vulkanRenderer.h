@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -16,6 +16,11 @@
 struct PushConstants
 {
 	glm::mat4 model;
+};
+
+struct UniformBufferObject {
+	glm::mat4 view;
+	glm::mat4 proj;
 };
 
 struct QueueFamilyIndices {
@@ -47,7 +52,7 @@ public:
 	virtual void Init(GLFWwindow* window) override;
 	virtual void Cleanup() override;
 	virtual void WaitIdle() override;
-	virtual void DrawFrame() override;
+	virtual void DrawFrame(const Scene& scene) override;
 	
 private:
 
@@ -92,7 +97,7 @@ private:
 
 	// per frame
 	void UpdateUniformBuffer(uint32_t frameIndex);
-	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
+	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene);
 
 	// debug overlay
 	void InitImGui();

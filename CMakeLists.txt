@@ -91,14 +91,9 @@ add_executable(Rebuild
     src/main.cpp
     src/rhi/RendererFactory.cpp
     src/scene/CubeMesh.cpp
-   src/scene/Image.cpp
+    src/scene/Scene.cpp
+    src/scene/Image.cpp
     ${IMGUI_SOURCES})
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/scene/Image.cpp")
-    target_sources(Rebuild PRIVATE src/scene/Image.cpp)
-else()
-    message(STATUS "src/scene/Image.cpp not present yet - texture loading (D18/R4-a) is not compiled in")
-endif()
 
 add_dependencies(Rebuild RebuildShaders)
 

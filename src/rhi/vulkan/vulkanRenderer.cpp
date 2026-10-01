@@ -1,4 +1,4 @@
-﻿#include "vulkanRenderer.h"
+#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -13,17 +13,11 @@
 #include <algorithm>
 #include <fstream>
 #include <array>
-#include <chrono>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <scene/Image.h>
-
-struct UniformBufferObject {
-    glm::mat4 model;
-    glm::mat4 view;
-    glm::mat4 proj;
-};
+#include <scene/Scene.h>
 
 std::vector<char> ReadFile(const std::string& filename)
 {
@@ -183,7 +177,7 @@ void VulkanRenderer::WaitIdle()
         vkDeviceWaitIdle(m_device);
     }
 }
-void VulkanRenderer::DrawFrame() {
+void VulkanRenderer::DrawFrame(const Scene& scene) {
 
     // 轮询帧缓冲区大小而不是使用调整大小回调可以减少动用的部分，而且还能自动处理 DPI 变化。
     int width = 0;
@@ -231,7 +225,7 @@ void VulkanRenderer::DrawFrame() {
 
     UpdateUniformBuffer(m_currentFrame);
 
-    RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
+    RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, scene);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -931,15 +925,7 @@ void VulkanRenderer::CreateDepthResources() {
 
 void VulkanRenderer::CreateGraphicsPipeline()
 {
-    const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/cube_mvp.vert.spv");
-    // 片元换成会采样贴图的那一份：cube_mvp.frag 收了 fragTexCoord 却没用它
-    // （outColor = vec4(fragColor, 1.0)），在它之后贴图永远不会出现。
-    //
-    // 顶点暂时不跟着换成 mesh.vert：仓库里那份来自参考工程**更晚的提交**（D25），
-    // model 已经搬进 push constant、UBO 只剩 {view, proj}，和现在的
-    // UniformBufferObject{model, view, proj} 对不上，而管线里也没有 push constant
-    // range —— 切过去画面会整体错位。两份 shader 的 in/out 位置一致，混用是安全的；
-    // 等 D25 搬 push constant 时再一起切。
+    const std::vector<char> vertShaderCode = ReadFile(std::string(SHADER_DIR) + "/mesh.vert.spv");
     const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/mesh.frag.spv");
 
     const VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
@@ -1030,10 +1016,24 @@ void VulkanRenderer::CreateGraphicsPipeline()
     dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
     dynamicState.pDynamicStates = dynamicStates.data();
 
+    // 管线布局必须声明与着色器在 set 0（每帧相机缓冲区）绑定的相同 set 布局。如果不匹配，会导致管线创建失败。
+    const VkDescriptorSetLayout setLayouts[] = { m_descriptorSetLayout };
+
+    // model矩阵作为 push 常量传入。
+    // 阶段标志必须和着色器实际读取它的地方匹配——这里只在顶点阶段。
+    // 搞错了的话不会在管线创建时失败，而会在绘制时失败。
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(PushConstants);
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &m_descriptorSetLayout;
+    pipelineLayoutInfo.pSetLayouts = setLayouts;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
     if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("failed to create pipeline layout!");
     }
@@ -1416,7 +1416,7 @@ void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerInfo.mipLodBias = 0.0f;
     samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = mipLevels;
+    samplerInfo.maxLod = static_cast<float>(mipLevels);
 
     if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_textureSampler) != VK_SUCCESS) {
         throw std::runtime_error("failed to create texture sampler!");
@@ -1425,12 +1425,7 @@ void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
 
 void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex)
 {
-    static auto startTime = std::chrono::high_resolution_clock::now();
-
     UniformBufferObject ubo{};
-    const float time = static_cast<float>(glfwGetTime());
-    ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0, 1, 0));
-    ubo.model = glm::rotate(ubo.model, glm::radians(25.0f), glm::vec3(1, 0, 0));   // 两个轴一起转才看得出深度
     ubo.view = glm::lookAt(glm::vec3(2.0f), glm::vec3(0.0f), glm::vec3(0, 1, 0));
     ubo.proj = glm::perspective(glm::radians(45.0f),
         m_swapChainExtent.width / static_cast<float>(m_swapChainExtent.height),
@@ -1439,7 +1434,7 @@ void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex)
     memcpy(m_uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
 }
 
-void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
@@ -1482,7 +1477,13 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_currentFrame], 0, nullptr);
 
-    vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+    for (auto& object : scene.objects)
+    {
+        const PushConstants push{ Scene::WorldTransform(object) };
+        vkCmdPushConstants(commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+            0, sizeof(PushConstants), &push);
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+    }
 
     // ImGui 会把它的绘制命令记录到同一个 renderpass 和 subpass 里;
     // 这就是为什么后端与渲染过程对象绑定。

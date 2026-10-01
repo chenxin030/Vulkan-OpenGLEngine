@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 struct GLFWwindow;
+struct Scene;
 
 class Renderer
 {
@@ -13,7 +14,7 @@ public:
 
 	virtual void ConfigureWindowHints() const = 0;
 	virtual void Init(GLFWwindow* window) = 0;
-	virtual void DrawFrame() = 0;
+	virtual void DrawFrame(const Scene& scene) = 0;
 	virtual void WaitIdle() = 0;
 	virtual void Cleanup() = 0;
 };

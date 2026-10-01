@@ -1,16 +1,10 @@
 #version 450
-
-// Per-frame camera data. Mirrors UniformBufferObject in vulkan_renderer.h (std140).
-// Two mat4 = 128 bytes with no padding.
 layout(binding = 0) uniform UniformBufferObject
 {
     mat4 view;
     mat4 proj;
 } ubo;
 
-// Per-object data. A push constant, so it arrives through the pipeline layout
-// rather than a descriptor set - see the note on PushConstants in
-// vulkan_renderer.h for why that is the right call for a single matrix.
 layout(push_constant) uniform PushConstants
 {
     mat4 model;

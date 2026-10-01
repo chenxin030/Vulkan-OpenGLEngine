@@ -1,5 +1,6 @@
 ﻿#include "rhi/Renderer.h"
 #include "rhi/RendererFactory.h"
+#include "scene/Scene.h"
 
 #include <GLFW/glfw3.h>
 
@@ -36,12 +37,23 @@ int main()
             throw std::runtime_error("ERROR: GLFW window create");
         glfwSetKeyCallback(window, KeyCallback);
 
+        Scene scene = BuildDemoScene();
+
         renderer->Init(window);
+
+        double previousTime = glfwGetTime();
 
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
-            renderer->DrawFrame();
+
+            const double now = glfwGetTime();
+            const float deltaSeconds = static_cast<float>(now - previousTime);
+            previousTime = now;
+
+            scene.Update(deltaSeconds);
+
+            renderer->DrawFrame(scene);
         }
         renderer->WaitIdle();
         renderer->Cleanup();
