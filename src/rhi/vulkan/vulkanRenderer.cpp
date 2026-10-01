@@ -101,8 +101,7 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateVertexBuffer();
     CreateIndicesBuffer();
     CreateTextureImage();
-    CreateTextureImageView();
-    CreateTextureSampler();
+    CreateTextureSampler(m_textureMipLevels);
 
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
@@ -903,13 +902,30 @@ void VulkanRenderer::CreateImageViews() {
     m_swapChainImageViews.resize(m_swapChainImages.size());
 
     for (size_t i = 0; i < m_swapChainImages.size(); ++i) {
-        m_swapChainImageViews[i] = CreateImageView(m_swapChainImages[i], m_swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+        VkImageViewCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        createInfo.image = m_swapChainImages[i];
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        createInfo.format = m_swapChainImageFormat;
+        createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        createInfo.subresourceRange.baseMipLevel = 0;
+        createInfo.subresourceRange.levelCount = 1;
+        createInfo.subresourceRange.baseArrayLayer = 0;
+        createInfo.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(m_device, &createInfo, nullptr, &m_swapChainImageViews[i]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image views!");
+        }
     }
 }
 
 void VulkanRenderer::CreateDepthResources() {
     VkFormat depthFormat = FindDepthFormat();
-    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
+    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
     m_depthImageView = CreateImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
@@ -1245,7 +1261,8 @@ void VulkanRenderer::CreateIndicesBuffer()
     vkDestroyBuffer(m_device, stagingBuffer, nullptr);
     vkFreeMemory(m_device, stagingBufferMemory, nullptr);
 }
-void VulkanRenderer::CreateTextureImage() {
+void VulkanRenderer::CreateTextureImage() 
+{
     const std::string path = std::string(ASSET_DIR) + "/checkerboard.ppm";
     const Image image = LoadImage(path);
     if (!image.IsValid()) {
@@ -1255,7 +1272,35 @@ void VulkanRenderer::CreateTextureImage() {
     m_textureWidth = image.width;
     m_textureHeight = image.height;
 
-    m_textureMipLevels = 1;
+    m_textureMipLevels = static_cast<uint32_t>(std::floor(
+        std::log2(static_cast<double>(std::max(image.width, image.height))))) + 1;
+
+    // 规范中并不保证不同 mip 级别之间的线性 Blitting。
+    // 一个格式即使可以完美采样，也可能无法作为 Blit 的源或目的地。
+    // 在依赖它之前最好先确认，而不是直接发布在某个厂商驱动下整个贴图都变黑的纹理。
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, VK_FORMAT_R8G8B8A8_SRGB, &formatProperties);
+
+    const VkFormatFeatureFlags requiredFeatures =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+
+    if ((formatProperties.optimalTilingFeatures & requiredFeatures) != requiredFeatures) {
+        throw std::runtime_error(
+            "the texture format lacks blit or linear-filter support on this device, "
+            "so a mip chain cannot be generated");
+    }
+
+    VkImageFormatProperties imageFormatProperties{};
+    if (vkGetPhysicalDeviceImageFormatProperties(
+        m_physicalDevice, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        0, &imageFormatProperties) != VK_SUCCESS ||
+        imageFormatProperties.maxMipLevels < m_textureMipLevels) {
+        throw std::runtime_error(
+            "the device cannot provide the requested mip chain for the texture format");
+    }
 
     const VkDeviceSize imageSize = static_cast<VkDeviceSize>(image.width) *
         static_cast<VkDeviceSize>(image.height) * 4;
@@ -1270,25 +1315,86 @@ void VulkanRenderer::CreateTextureImage() {
     memcpy(data, image.pixels.data(), static_cast<size_t>(imageSize));
     vkUnmapMemory(m_device, stagingBufferMemory);
 
-    CreateImage(image.width, image.height, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
+    CreateImage(image.width, image.height, m_textureMipLevels, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
 
     const VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-    TransitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    CopyBufferToImage(stagingBuffer, m_textureImage, static_cast<uint32_t>(m_textureWidth), static_cast<uint32_t>(m_textureHeight));
+    TransitionImageLayout(commandBuffer, m_textureImage,  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1);
+    CopyBufferToImage(commandBuffer, stagingBuffer, m_textureImage, static_cast<uint32_t>(m_textureWidth), static_cast<uint32_t>(m_textureHeight));
+    GenerateMipmaps(commandBuffer, m_textureImage,
+        static_cast<int32_t>(image.width), static_cast<int32_t>(image.height),
+        m_textureMipLevels);
+    TransitionImageLayout(commandBuffer, m_textureImage,  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, m_textureMipLevels - 1, 1);
 
-    TransitionImageLayout(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    EndSingleTimeCommands(commandBuffer);
 
     vkDestroyBuffer(m_device, stagingBuffer, nullptr);
     vkFreeMemory(m_device, stagingBufferMemory, nullptr);
-}
 
-void VulkanRenderer::CreateTextureImageView()
-{
     m_textureImageView = CreateImageView(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, m_textureMipLevels);
 }
 
-void VulkanRenderer::CreateTextureSampler()
+void VulkanRenderer::GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage image,
+    int32_t width, int32_t height, uint32_t mipLevels) const
+{
+    if (mipLevels <= 1) {
+        return;
+    }
+
+    // 除最后一级外每个级别都以 SHADER_READ_ONLY_OPTIMAL 结束此功能。
+    // 级别 0 在这里以 TRANSFER_DST 状态到达（调用方会把暂存缓冲区复制进来），最后一个级别则保留为一个从未被读取过的普通目标。
+    int32_t sourceWidth = width;
+    int32_t sourceHeight = height;
+
+    for (uint32_t level = 1; level < mipLevels; ++level) {
+        // 上一级变成 blit 源 ……
+        TransitionImageLayout(commandBuffer, image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            level - 1, 1);
+
+        // ……而这一层变成目标。
+        // 在指定 blit 的 TRANSFER_DST_OPTIMAL 时，让目标保持 UNDEFINED 状态。它通常能侥幸通过。这不是必须侥幸通过的情况。
+        TransitionImageLayout(commandBuffer, image,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            level, 1);
+
+        const int32_t destinationWidth = sourceWidth > 1 ? sourceWidth / 2 : 1;
+        const int32_t destinationHeight = sourceHeight > 1 ? sourceHeight / 2 : 1;
+
+        VkImageBlit blit{};
+        blit.srcOffsets[0] = { 0, 0, 0 };
+        blit.srcOffsets[1] = { sourceWidth, sourceHeight, 1 };
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = level - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = 1;
+        blit.dstOffsets[0] = { 0, 0, 0 };
+        blit.dstOffsets[1] = { destinationWidth, destinationHeight, 1 };
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = level;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = 1;
+
+        // 两边都是相同的图像，不同的 mip 级别：在不进行第二次分配的情况下进行原地下采样的标准方法。
+        vkCmdBlitImage(commandBuffer,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        // 源层现在已经完全读取完毕，所以它可以进入最终布局，同时循环继续进行。
+        TransitionImageLayout(commandBuffer, image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            level - 1, 1);
+
+        sourceWidth = destinationWidth;
+        sourceHeight = destinationHeight;
+    }
+}
+
+void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
 {
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1310,7 +1416,7 @@ void VulkanRenderer::CreateTextureSampler()
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerInfo.mipLodBias = 0.0f;
     samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = 0.0f;
+    samplerInfo.maxLod = mipLevels;
 
     if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_textureSampler) != VK_SUCCESS) {
         throw std::runtime_error("failed to create texture sampler!");
@@ -1603,7 +1709,7 @@ void VulkanRenderer::CreateRenderPass()
     }
 }
 
-void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
+void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
 {
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1611,7 +1717,7 @@ void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, VkFormat forma
     imageInfo.extent.width = width;
     imageInfo.extent.height = height;
     imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
+    imageInfo.mipLevels = mipLevels;
     imageInfo.arrayLayers = 1;
     imageInfo.format = format;
     imageInfo.tiling = tiling;
@@ -1662,61 +1768,57 @@ VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format,
     return imageView;
 }
 
-void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)
+void VulkanRenderer::TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount) const
 {
-    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout = oldLayout;
     barrier.newLayout = newLayout;
+    // VK_QUEUE_FAMILY_IGNORED 因为这里图形队列和呈现队列属于同一个队列族，所以不涉及队列所有权的转移。
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseMipLevel = baseMipLevel;
+    barrier.subresourceRange.levelCount = levelCount;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = 0;
 
-    if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-        if (HasStencilComponent(format)) {
-            barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-        }
-    }
-    else {
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    }
-
-    VkPipelineStageFlags sourceStage;
-    VkPipelineStageFlags destinationStage;
-    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+    // stage 和 access masks 必须描述这个屏障两侧的实际生成者和使用者。
+    // 把一个有效的配对复制到错误的转换中，就会出现只有在负载下才会显现的竞争条件，
+    // 所以每个支持的转换都被明确列出，其他任何情况都会被明令拒绝，而不是默默地导致不同步。
+    VkPipelineStageFlags sourceStage = 0;
+    VkPipelineStageFlags destinationStage = 0;
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
+        newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
         sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
-    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+        newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+        newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
         sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     }
-    else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL &&
+        newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     }
     else {
-        throw std::invalid_argument("unsupported layout transition!");
+        throw std::runtime_error("unsupported image layout transition!");
     }
 
     vkCmdPipelineBarrier(
@@ -1727,12 +1829,10 @@ void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkIma
         0, nullptr,
         1, &barrier
     );
-    EndSingleTimeCommands(commandBuffer);
 }
 
-void VulkanRenderer::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
+void VulkanRenderer::CopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
 {
-    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
     VkBufferImageCopy region{};
     region.bufferOffset = 0;
     region.bufferRowLength = 0;
@@ -1757,11 +1857,6 @@ void VulkanRenderer::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t 
         1,
         &region
     );
-    EndSingleTimeCommands(commandBuffer);
-}
-
-bool VulkanRenderer::HasStencilComponent(VkFormat format) {
-    return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
 }
 
 void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
