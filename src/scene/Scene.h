@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
+#include "Camera.h"
 
 struct SceneObject
 {
@@ -15,6 +16,8 @@ struct SceneObject
 struct Scene
 {
     std::vector<SceneObject> objects;
+
+    Camera camera;
 
     void Update(float deltaSeconds);
 

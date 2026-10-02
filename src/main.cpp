@@ -1,5 +1,7 @@
-﻿#include "rhi/Renderer.h"
+﻿#include "platform/GlfwInput.h"
+#include "rhi/Renderer.h"
 #include "rhi/RendererFactory.h"
+#include "scene/CameraController.h"
 #include "scene/Scene.h"
 
 #include <GLFW/glfw3.h>
@@ -38,6 +40,8 @@ int main()
         glfwSetKeyCallback(window, KeyCallback);
 
         Scene scene = BuildDemoScene();
+        GlfwInput input(window);
+        const CameraController cameraController;
 
         renderer->Init(window);
 
@@ -51,6 +55,8 @@ int main()
             const float deltaSeconds = static_cast<float>(now - previousTime);
             previousTime = now;
 
+            const InputState inputState = input.Sample();
+            cameraController.Update(scene.camera, inputState, deltaSeconds);
             scene.Update(deltaSeconds);
 
             renderer->DrawFrame(scene);

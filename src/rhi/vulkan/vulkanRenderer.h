@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -96,7 +96,7 @@ private:
 	void CreateTextureSampler(uint32_t mipLevels);
 
 	// per frame
-	void UpdateUniformBuffer(uint32_t frameIndex);
+	void UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene);
 	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene);
 
 	// debug overlay

@@ -1,4 +1,4 @@
-#include "vulkanRenderer.h"
+﻿#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -216,14 +216,14 @@ void VulkanRenderer::DrawFrame(const Scene& scene) {
 
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
 
+    UpdateUniformBuffer(m_currentFrame, scene);
+
     // 在录制之前先构建 UI，这样命令缓冲区就会使用这一帧的绘制数据。
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     BuildImGuiFrame();
     ImGui::Render();
-
-    UpdateUniformBuffer(m_currentFrame);
 
     RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, scene);
 
@@ -1423,13 +1423,13 @@ void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
     }
 }
 
-void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex)
+void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene)
 {
     UniformBufferObject ubo{};
-    ubo.view = glm::lookAt(glm::vec3(2.0f), glm::vec3(0.0f), glm::vec3(0, 1, 0));
-    ubo.proj = glm::perspective(glm::radians(45.0f),
-        m_swapChainExtent.width / static_cast<float>(m_swapChainExtent.height),
-        0.1f, 10.0f);
+    ubo.view = scene.camera.ViewMatrix();
+    const float aspect = static_cast<float>(m_swapChainExtent.width) /
+        static_cast<float>(m_swapChainExtent.height);
+    ubo.proj = scene.camera.ProjectionMatrix(aspect);
     ubo.proj[1][1] *= -1.0f;
     memcpy(m_uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
 }

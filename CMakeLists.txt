@@ -90,9 +90,12 @@ add_executable(Rebuild
     src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
     src/rhi/RendererFactory.cpp
+    # 平台层：main.cpp 之外唯一碰 OS 的编译单元。
+    src/platform/GlfwInput.cpp
+    src/scene/CameraController.cpp
     src/scene/CubeMesh.cpp
-    src/scene/Scene.cpp
     src/scene/Image.cpp
+    src/scene/Scene.cpp
     ${IMGUI_SOURCES})
 
 add_dependencies(Rebuild RebuildShaders)

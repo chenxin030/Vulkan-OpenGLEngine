@@ -1,4 +1,4 @@
-#include "Scene.h"
+﻿#include "Scene.h"
 
 #include <cmath>
 #include <glm/ext/matrix_transform.hpp>
@@ -67,6 +67,12 @@ Scene BuildDemoScene()
             scene.objects.push_back(SceneObject{ .baseTransform = placement });
         }
     }
+
+    // Starting pose only. The camera belongs to the user now, so there is no orbit
+    // animation to hand over - just somewhere sensible to begin.
+    scene.camera.position = glm::vec3(0.0f, 3.5f, 9.0f);
+    scene.camera.yaw = -1.5707963f;   // looking along -Z, at the ring
+    scene.camera.pitch = -0.25f;      // angled slightly down
 
     return scene;
 }
