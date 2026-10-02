@@ -48,8 +48,8 @@ cmake --build build --config Debug
 | D18 | 贴图：stb + 两次布局转换 + 采样器 | ✔ `eecad24` |
 | D19 | mip 链（含**目标层级**的 barrier）+ 各向异性 | ✔ `dd9bd9e` |
 | D25 | 多物体 + `model` 改 push constant | ✔ `b35e7ba` |
-| D26 | `Camera` + `InputState` + `GlfwInput` | ⬜ |
-| D27 | `CameraController` + 接进主循环（WASD 飞起来） | ⬜ |
+| D26 | `Camera` + `InputState` + `GlfwInput` | ✔ `9529b2f` |
+| D27 | `CameraController` + 接进主循环（WASD 飞起来） | ✔ `9529b2f` |
 | D32 | ECS：`Entity` + `Registry` + `Components` + `Systems` | ⬜ |
 | D33 | `MeshLibrary` + `GpuMesh` + 懒惰上传 | ⬜ |
 | D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ⬜ |
@@ -57,13 +57,6 @@ cmake --build build --config Debug
 | D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ⬜ |
 
 > 验收记录（证据、命令、判据）在 `notes\` 下，每个增量一份；`notes/` 不入库。
-| D26 | `Camera` + `InputState` + `GlfwInput` | ⬜ |
-| D27 | `CameraController` + 接进主循环（WASD 飞起来） | ⬜ |
-| D32 | ECS：`Entity` + `Registry` + `Components` + `Systems` | ⬜ |
-| D33 | `MeshLibrary` + `GpuMesh` + 懒惰上传 | ⬜ |
-| D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ⬜ |
-| D38 | 接 VMA + 每处主机写入后 flush | ⬜ |
-| D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ⬜ |
 
 ---
 
