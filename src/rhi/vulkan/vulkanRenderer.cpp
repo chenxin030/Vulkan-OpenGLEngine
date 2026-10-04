@@ -1477,11 +1477,11 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_currentFrame], 0, nullptr);
 
-    for (auto& object : scene.objects)
-    {
-        const PushConstants push{ Scene::WorldTransform(object) };
+    for (const DrawItem& item : scene.drawItems) {
+        const PushConstants push{ item.worldTransform };
         vkCmdPushConstants(commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
             0, sizeof(PushConstants), &push);
+
         vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
     }
 

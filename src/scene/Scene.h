@@ -1,27 +1,24 @@
-﻿#pragma once
+#pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
 #include "Camera.h"
+#include "scene/Registry.h"
 
-struct SceneObject
+struct DrawItem
 {
-    glm::mat4 baseTransform{ 1.0f }; 
-
-    glm::vec3 spinAxis{ 0.0f, 1.0f, 0.0f };
-    float spinSpeed = 0.0f;
-    float spinAngle = 0.0f;
+    glm::mat4 worldTransform{ 1.0f };
+    uint32_t meshIndex = 0;
 };
 
 struct Scene
 {
-    std::vector<SceneObject> objects;
-
+    Registry registry;
     Camera camera;
 
-    void Update(float deltaSeconds);
+    std::vector<DrawItem> drawItems;
 
-    static glm::mat4 WorldTransform(const SceneObject& object);
+    void Update(float deltaSeconds);
 };
 
 Scene BuildDemoScene();

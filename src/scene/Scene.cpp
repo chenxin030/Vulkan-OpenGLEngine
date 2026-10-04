@@ -1,4 +1,7 @@
-﻿#include "Scene.h"
+#include "Scene.h"
+
+#include "scene/Components.h"
+#include "scene/Systems.h"
 
 #include <cmath>
 #include <glm/ext/matrix_transform.hpp>
@@ -11,18 +14,19 @@ constexpr float kPi = 3.14159265358979323846f;
 
 void Scene::Update(float deltaSeconds)
 {
-    for (SceneObject& object : objects) {
-        object.spinAngle += object.spinSpeed * deltaSeconds;
-    }
-}
+    // 顺序在这里写死，而且重要：先推进 angle，再由 angle 组出 world；反过来画面慢一帧。
+    // 显式三行（而不是一张系统注册表）也是它能被 grep 到的原因。
+    SpinSystem(registry, deltaSeconds);
+    TransformSystem(registry);
 
-glm::mat4 Scene::WorldTransform(const SceneObject& object)
-{
-    // base * rotate：旋转先作用在顶点上，所以物体绕自己的中心转，
-    // 再由 baseTransform 把它摆到位置上。两个顺序换一下，
-    // 立方体就会绕世界原点公转。
-    return object.baseTransform *
-        glm::rotate(glm::mat4(1.0f), object.spinAngle, object.spinAxis);
+    // 一般来说实体动了就只改列表里对应那一项更快，但要求每一条修改世界的路径都记得同步列表
+    // 现在规模小，几次到几十次矩阵拷贝就可以防止出问题
+    drawItems.clear();
+
+    registry.ForEach<Transform, MeshRenderer>(
+        [this](Entity, const Transform& transform, const MeshRenderer& mesh) {
+        drawItems.push_back(DrawItem{ transform.world, mesh.meshIndex });
+    });
 }
 
 Scene BuildDemoScene()
@@ -31,11 +35,16 @@ Scene BuildDemoScene()
 
     // --- ground ---------------------------------------------------------------
     {
-        glm::mat4 transform;
-        transform = glm::scale(
+        const Entity ground = scene.registry.Create();
+
+        Transform transform;
+        transform.local = glm::scale(
             glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.75f, 0.0f)),
             glm::vec3(8.0f, 0.05f, 8.0f));
-        scene.objects.push_back(SceneObject{ .baseTransform = transform });
+        transform.world = transform.local;
+        scene.registry.Add<Transform>(ground, transform);
+
+        scene.registry.Add<MeshRenderer>(ground, MeshRenderer{ 0 });
     }
 
     constexpr int kObjectCount = 5;
@@ -52,24 +61,29 @@ Scene BuildDemoScene()
             glm::mat4(1.0f),
             glm::vec3(std::cos(angle) * kRingRadius, height, std::sin(angle) * kRingRadius));
 
-        // 尺寸各不相同，这样立方体在视觉上容易区分，而且转换顺序的错误也能立即被发现。
         placement = glm::scale(placement, glm::vec3(0.55f + 0.15f * static_cast<float>(i % 3)));
+
+        const Entity entity = scene.registry.Create();
+
+        Transform transform;
+        transform.local = placement;
+        transform.world = placement;
+        scene.registry.Add<Transform>(entity, transform);
+
+        const uint32_t mesh = 0;
+        scene.registry.Add<MeshRenderer>(entity, MeshRenderer{ mesh });
 
         const bool spins = (i < 2) || (i >= 4);
         if (spins) {
-            glm::vec3 axis = glm::normalize(
+            Spin spin;
+            spin.axis = glm::normalize(
                 glm::vec3(0.35f, 1.0f, 0.2f + 0.15f * static_cast<float>(i)));
-            float speed = 0.5f + 0.25f * static_cast<float>(i);
-            scene.objects.push_back(SceneObject{ .baseTransform = placement, .spinAxis = axis,
-                .spinSpeed = speed, .spinAngle = angle });
-        }
-        else {
-            scene.objects.push_back(SceneObject{ .baseTransform = placement });
+            spin.speed = 0.5f + 0.25f * static_cast<float>(i);
+            spin.angle = angle;
+            scene.registry.Add<Spin>(entity, spin);
         }
     }
 
-    // Starting pose only. The camera belongs to the user now, so there is no orbit
-    // animation to hand over - just somewhere sensible to begin.
     scene.camera.position = glm::vec3(0.0f, 3.5f, 9.0f);
     scene.camera.yaw = -1.5707963f;   // looking along -Z, at the ring
     scene.camera.pitch = -0.25f;      // angled slightly down
