@@ -2,6 +2,7 @@
 
 #include "scene/Components.h"
 #include "scene/Systems.h"
+#include "MeshLibrary.h"
 
 #include <cmath>
 #include <glm/ext/matrix_transform.hpp>
@@ -38,13 +39,15 @@ Scene BuildDemoScene()
         const Entity ground = scene.registry.Create();
 
         Transform transform;
+        // 平面网格是 2x2（立方体是 1x1），所以 4 给出和 D32 同样的 8x8 地板；
+        // 立方体时代那个 (8, 0.05, 8) 的压扁参数对没有厚度的平面没有意义。
         transform.local = glm::scale(
             glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.75f, 0.0f)),
-            glm::vec3(8.0f, 0.05f, 8.0f));
+            glm::vec3(4.0f));
         transform.world = transform.local;
         scene.registry.Add<Transform>(ground, transform);
 
-        scene.registry.Add<MeshRenderer>(ground, MeshRenderer{ 0 });
+        scene.registry.Add<MeshRenderer>(ground, MeshRenderer{ MeshLibrary::kPlane });
     }
 
     constexpr int kObjectCount = 5;
@@ -70,7 +73,7 @@ Scene BuildDemoScene()
         transform.world = placement;
         scene.registry.Add<Transform>(entity, transform);
 
-        const uint32_t mesh = 0;
+        const uint32_t mesh = (i % 2 == 0) ? MeshLibrary::kCube : MeshLibrary::kPyramid;
         scene.registry.Add<MeshRenderer>(entity, MeshRenderer{ mesh });
 
         const bool spins = (i < 2) || (i >= 4);
@@ -82,6 +85,15 @@ Scene BuildDemoScene()
             spin.angle = angle;
             scene.registry.Add<Spin>(entity, spin);
         }
+    }
+
+    {
+        const Entity pivot = scene.registry.Create();
+
+        Transform transform;
+        transform.local = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
+        transform.world = transform.local;
+        scene.registry.Add<Transform>(pivot, transform);
     }
 
     scene.camera.position = glm::vec3(0.0f, 3.5f, 9.0f);

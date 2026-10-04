@@ -92,12 +92,11 @@ add_executable(Rebuild
     src/rhi/RendererFactory.cpp
     src/platform/GlfwInput.cpp
     src/scene/CameraController.cpp
-    src/scene/CubeMesh.cpp
     src/scene/Image.cpp
+    src/scene/MeshLibrary.cpp
+    src/scene/Registry.cpp
     src/scene/Scene.cpp
     src/scene/Systems.cpp
-    src/scene/Scene.cpp
-    src/scene/Registry.cpp
     ${IMGUI_SOURCES})
 
 add_dependencies(Rebuild RebuildShaders)

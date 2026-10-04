@@ -92,8 +92,6 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateCommandPool();
     CreateCommandBuffers();
 
-    CreateVertexBuffer();
-    CreateIndicesBuffer();
     CreateTextureImage();
     CreateTextureSampler(m_textureMipLevels);
 
@@ -130,12 +128,17 @@ void VulkanRenderer::Cleanup() {
         m_commandPool = VK_NULL_HANDLE;
     }
 
-    vkDestroyBuffer(m_device, m_indexBuffer, nullptr);
-    vkFreeMemory(m_device, m_indexBufferMemory, nullptr);
-
-    vkDestroyBuffer(m_device, m_vertexBuffer, nullptr);
-    vkFreeMemory(m_device, m_vertexBufferMemory, nullptr);
-
+    for (GpuMesh& mesh : m_meshes) {
+        vkDestroyBuffer(m_device, mesh.vertexBuffer, nullptr);
+        vkDestroyBuffer(m_device, mesh.indexBuffer, nullptr);
+        vkFreeMemory(m_device, mesh.vertexBufferMemory, nullptr);
+        vkFreeMemory(m_device, mesh.indexBufferMemory, nullptr);
+        mesh.vertexBuffer = VK_NULL_HANDLE;
+        mesh.indexBuffer = VK_NULL_HANDLE;
+        mesh.vertexBufferMemory = VK_NULL_HANDLE;
+        mesh.indexBufferMemory = VK_NULL_HANDLE;
+    }
+    m_meshes.clear();
 
     for (size_t i = 0; i < kMaxFramesInFlight; i++) {
         vkDestroyBuffer(m_device, m_uniformBuffers[i], nullptr);
@@ -224,6 +227,8 @@ void VulkanRenderer::DrawFrame(const Scene& scene) {
     ImGui::NewFrame();
     BuildImGuiFrame();
     ImGui::Render();
+
+    UploadMeshes(scene.meshes);
 
     RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, scene);
 
@@ -1220,47 +1225,6 @@ void VulkanRenderer::DestroyRenderFinishedSemaphores()
     m_renderFinishedSemaphores.clear();
 }
 
-void VulkanRenderer::CreateVertexBuffer()
-{
-    VkDeviceSize bufferSize = m_vertices.size() * sizeof(Vertex);
-
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-    void* data;
-    vkMapMemory(m_device, stagingBufferMemory, 0, bufferSize, 0, &data);
-    memcpy(data, m_vertices.data(), (size_t)bufferSize);
-    vkUnmapMemory(m_device, stagingBufferMemory);
-
-    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_vertexBuffer, m_vertexBufferMemory);
-
-    CopyBuffer(stagingBuffer, m_vertexBuffer, bufferSize);
-
-    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
-}
-
-void VulkanRenderer::CreateIndicesBuffer()
-{
-    VkDeviceSize bufferSize = sizeof(m_indices[0]) * m_indices.size();
-
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-    void* data;
-    vkMapMemory(m_device, stagingBufferMemory, 0, bufferSize, 0, &data);
-    memcpy(data, m_indices.data(), (size_t)bufferSize);
-    vkUnmapMemory(m_device, stagingBufferMemory);
-
-    CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexBufferMemory);
-
-    CopyBuffer(stagingBuffer, m_indexBuffer, bufferSize);
-
-    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
-}
 void VulkanRenderer::CreateTextureImage() 
 {
     const std::string path = std::string(ASSET_DIR) + "/checkerboard.ppm";
@@ -1423,6 +1387,41 @@ void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
     }
 }
 
+void VulkanRenderer::UploadMeshes(const MeshLibrary& meshes)
+{
+    // 首次使用时懒加载，而不是在初始化时急切加载，因为初始化根本不知道世界里有什么
+    // 而且一个必须先拿到网格列表才能开始的渲染器，就是一个坚持要提前知道整个世界的渲染器。
+    // 现在，大小比较就是完整的过时性检查，这在网格不可变且只能追加时已经足够。热重载会把它变成每条条目的版本检查，而这个改动只会在这个函数内部进行。
+    const uint32_t target = meshes.Count();
+    if (m_meshes.size() >= target) {
+        return;
+    }
+
+    const uint32_t firstNew = static_cast<uint32_t>(m_meshes.size());
+    m_meshes.resize(target);
+
+    for (uint32_t index = firstNew; index < target; ++index) {
+        UploadMesh(meshes.Get(index), index);
+    }
+}
+
+void VulkanRenderer::UploadMesh(const MeshData& mesh, uint32_t meshIndex)
+{
+    GpuMesh& gpuMesh = m_meshes[meshIndex];
+
+    UploadToDeviceLocal(mesh.vertices.data(),
+        sizeof(Vertex) * mesh.vertices.size(),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        gpuMesh.vertexBuffer, gpuMesh.vertexBufferMemory);
+
+    UploadToDeviceLocal(mesh.indices.data(),
+        sizeof(uint16_t) * mesh.indices.size(),
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        gpuMesh.indexBuffer, gpuMesh.indexBufferMemory);
+
+    gpuMesh.indexCount = static_cast<uint32_t>(mesh.indices.size());
+}
+
 void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene)
 {
     UniformBufferObject ubo{};
@@ -1470,19 +1469,21 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
     scissor.extent = m_swapChainExtent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    VkBuffer vertexBuffers[] = { m_vertexBuffer };
-    VkDeviceSize offsets[] = { 0 };
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-    vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
-
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_currentFrame], 0, nullptr);
 
     for (const DrawItem& item : scene.drawItems) {
+        const GpuMesh& mesh = m_meshes[item.meshIndex];
+
+        const VkBuffer vertexBuffers[] = { mesh.vertexBuffer };
+        const VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
         const PushConstants push{ item.worldTransform };
         vkCmdPushConstants(commandBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
             0, sizeof(PushConstants), &push);
 
-        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(m_indices.size()), 1, 0, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
     }
 
     // ImGui 会把它的绘制命令记录到同一个 renderpass 和 subpass 里;
@@ -1708,6 +1709,27 @@ void VulkanRenderer::CreateRenderPass()
     if (vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
         throw std::runtime_error("failed to create render pass!");
     }
+}
+
+void VulkanRenderer::UploadToDeviceLocal(const void* source, VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+{
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(m_device, stagingBufferMemory, 0, size, 0, &data);
+    memcpy(data, source, (size_t)size);
+    vkUnmapMemory(m_device, stagingBufferMemory);
+
+    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, bufferMemory);
+
+    CopyBuffer(stagingBuffer, buffer, size);
+
+    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
+    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
 }
 
 void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)

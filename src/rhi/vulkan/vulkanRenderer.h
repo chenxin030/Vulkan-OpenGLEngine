@@ -11,7 +11,7 @@
 
 #include "../Renderer.h"
 #include "scene/Vertex.h"
-#include "scene/CubeMesh.h"
+#include "scene/MeshLibrary.h"
 
 struct PushConstants
 {
@@ -68,9 +68,6 @@ private:
 	void CreateRenderFinishedSemaphores();
 	void DestroyRenderFinishedSemaphores();
 
-	void CreateVertexBuffer();
-	void CreateIndicesBuffer();
-
 	// resources sized to the swapchain
 	void CreateSwapChain();
 	void CreateImageViews();
@@ -96,6 +93,8 @@ private:
 	void CreateTextureSampler(uint32_t mipLevels);
 
 	// per frame
+	void UploadMeshes(const MeshLibrary& meshes);
+	void UploadMesh(const MeshData& mesh, uint32_t meshIndex);
 	void UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene);
 	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene);
 
@@ -124,6 +123,9 @@ private:
 	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 
+	void UploadToDeviceLocal(const void* source, VkDeviceSize size,
+		VkBufferUsageFlags usage,
+		VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
 		uint32_t mipLevels) const;
@@ -177,15 +179,19 @@ private:
 	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
 	std::vector<void*> m_uniformBuffersMapped;
 
+	struct GpuMesh
+	{
+		VkBuffer vertexBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
+		VkBuffer indexBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
+
+		uint32_t indexCount = 0;
+	};
+	std::vector<GpuMesh> m_meshes;
+
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
-
-	std::vector<Vertex> m_vertices = BuildCubeVertices();
-	std::vector<uint16_t> m_indices = BuildCubeIndices();
-	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
-	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
-	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
 
 	VkImage m_textureImage = VK_NULL_HANDLE;
 	VkDeviceMemory m_textureImageMemory;

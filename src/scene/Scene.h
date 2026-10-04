@@ -1,9 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
 #include "Camera.h"
 #include "scene/Registry.h"
+#include "MeshLibrary.h"
 
 struct DrawItem
 {
@@ -15,6 +16,8 @@ struct Scene
 {
     Registry registry;
     Camera camera;
+
+    MeshLibrary meshes;
 
     std::vector<DrawItem> drawItems;
 
