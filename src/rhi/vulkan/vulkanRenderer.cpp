@@ -1,4 +1,4 @@
-﻿#include "vulkanRenderer.h"
+#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -18,6 +18,18 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <scene/Image.h>
 #include <scene/Scene.h>
+
+std::string TextureAssetPath()
+{
+    return std::string(ASSET_DIR) + "/checkerboard.ppm";
+}
+
+namespace {
+
+// 纹理格式只在这里定义一次：上传、采样器、以及"能不能 blit"的能力查询必须问同一个格式。
+constexpr VkFormat kTextureFormat = VK_FORMAT_R8G8B8A8_SRGB;
+
+}  // namespace
 
 std::vector<char> ReadFile(const std::string& filename)
 {
@@ -93,7 +105,9 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateCommandBuffers();
 
     CreateTextureImage();
-    CreateTextureSampler(m_textureMipLevels);
+    // 这里**不再**调 CreateTextureSampler()：上传（UploadTexture）自己会建采样器，
+    // 因为 mip 层数取决于刚加载的尺寸，而热重载必须能用新的层数重建它。
+    // 原来两处都调，第二次会覆盖句柄、把上传时建的那个采样器泄漏掉（关窗时验证层会报出来）。
 
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
@@ -197,6 +211,12 @@ void VulkanRenderer::DrawFrame(const Scene& scene) {
         static_cast<uint32_t>(height) != m_swapChainExtent.height) {
         RecreateSwapChain();
         return;
+    }
+
+    // 放在这一帧的最前面：ReloadTexture() 会 WaitIdle + 销毁重建纹理资源与描述符，
+    // 绝不能发生在已经等过栅栏、或者已经开始录制之后。
+    if (m_textureWatch.ConsumeChanged()) {
+        ReloadTexture();
     }
 
     vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
@@ -681,6 +701,33 @@ void VulkanRenderer::CreateDescriptorSets()
         descriptorWrites[1].pImageInfo = &imageInfo;
 
         vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+    }
+}
+
+void VulkanRenderer::WriteTextureDescriptors()
+{
+    // 从 CreateDescriptorSets() 里拆出来，因为热重载只需要重写 binding 1，
+    // binding 0（每帧不同的 UBO）不许碰。
+    //
+    // 这里是**更新**已有的 set，而不是重新分配。这不是风格问题：池是按 kMaxFramesInFlight
+    // 精确分配的（每种描述符各 2 个、maxSets 也是 2），每次重载都重分配的话两次就把池用干，
+    // 失败在 vkAllocateDescriptorSets —— 而那个点离原因很远。
+    for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = m_textureImageView;
+        imageInfo.sampler = m_textureSampler;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_descriptorSets[i];
+        write.dstBinding = 1;
+        write.dstArrayElement = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
     }
 }
 
@@ -1225,77 +1272,19 @@ void VulkanRenderer::DestroyRenderFinishedSemaphores()
     m_renderFinishedSemaphores.clear();
 }
 
-void VulkanRenderer::CreateTextureImage() 
+void VulkanRenderer::CreateTextureImage()
 {
-    const std::string path = std::string(ASSET_DIR) + "/checkerboard.ppm";
+    const std::string path = TextureAssetPath();
     const Image image = LoadImage(path);
     if (!image.IsValid()) {
         throw std::runtime_error("decoded image is empty: " + path);
     }
-    
-    m_textureWidth = image.width;
-    m_textureHeight = image.height;
 
-    m_textureMipLevels = static_cast<uint32_t>(std::floor(
-        std::log2(static_cast<double>(std::max(image.width, image.height))))) + 1;
+    UploadTexture(image);
 
-    // 规范中并不保证不同 mip 级别之间的线性 Blitting。
-    // 一个格式即使可以完美采样，也可能无法作为 Blit 的源或目的地。
-    // 在依赖它之前最好先确认，而不是直接发布在某个厂商驱动下整个贴图都变黑的纹理。
-    VkFormatProperties formatProperties{};
-    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, VK_FORMAT_R8G8B8A8_SRGB, &formatProperties);
-
-    const VkFormatFeatureFlags requiredFeatures =
-        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
-        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-
-    if ((formatProperties.optimalTilingFeatures & requiredFeatures) != requiredFeatures) {
-        throw std::runtime_error(
-            "the texture format lacks blit or linear-filter support on this device, "
-            "so a mip chain cannot be generated");
-    }
-
-    VkImageFormatProperties imageFormatProperties{};
-    if (vkGetPhysicalDeviceImageFormatProperties(
-        m_physicalDevice, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-        VK_IMAGE_USAGE_SAMPLED_BIT,
-        0, &imageFormatProperties) != VK_SUCCESS ||
-        imageFormatProperties.maxMipLevels < m_textureMipLevels) {
-        throw std::runtime_error(
-            "the device cannot provide the requested mip chain for the texture format");
-    }
-
-    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(image.width) *
-        static_cast<VkDeviceSize>(image.height) * 4;
-
-    VkBuffer stagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory stagingBufferMemory;
-    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingBuffer, stagingBufferMemory);
-
-    void* data;
-    vkMapMemory(m_device, stagingBufferMemory, 0, imageSize, 0, &data);
-    memcpy(data, image.pixels.data(), static_cast<size_t>(imageSize));
-    vkUnmapMemory(m_device, stagingBufferMemory);
-
-    CreateImage(image.width, image.height, m_textureMipLevels, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
-
-    const VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-
-    TransitionImageLayout(commandBuffer, m_textureImage,  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1);
-    CopyBufferToImage(commandBuffer, stagingBuffer, m_textureImage, static_cast<uint32_t>(m_textureWidth), static_cast<uint32_t>(m_textureHeight));
-    GenerateMipmaps(commandBuffer, m_textureImage,
-        static_cast<int32_t>(image.width), static_cast<int32_t>(image.height),
-        m_textureMipLevels);
-    TransitionImageLayout(commandBuffer, m_textureImage,  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, m_textureMipLevels - 1, 1);
-
-    EndSingleTimeCommands(commandBuffer);
-
-    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
-
-    m_textureImageView = CreateImageView(m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, m_textureMipLevels);
+    // 基线必须在**首次加载成功之后**才打：打早了，第一帧的 ConsumeChanged()
+    // 就会为"刚刚加载的这个文件"返回 true，白白重载一次。
+    m_textureWatch.Reset(path);
 }
 
 void VulkanRenderer::GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage image,
@@ -1356,6 +1345,129 @@ void VulkanRenderer::GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage imag
         sourceWidth = destinationWidth;
         sourceHeight = destinationHeight;
     }
+}
+
+void VulkanRenderer::UploadTexture(const Image& image)
+{
+    m_textureWidth = image.width;
+    m_textureHeight = image.height;
+
+    // 完整 mip 链直到 1x1：最长边的 log2，加上基础层。
+    m_textureMipLevels = static_cast<uint32_t>(std::floor(
+        std::log2(static_cast<double>(std::max(image.width, image.height))))) + 1;
+
+    // 规范并不保证 mip 级别之间的线性 blit：一个格式能采样，却可能拒绝当 blit 的源或目标。
+    // 先问，而不是在某些厂商驱动上发布一张全黑的贴图。
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, kTextureFormat, &formatProperties);
+
+    const VkFormatFeatureFlags requiredFeatures =
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+
+    if ((formatProperties.optimalTilingFeatures & requiredFeatures) != requiredFeatures) {
+        throw std::runtime_error(
+            "the texture format lacks blit or linear-filter support on this device, "
+            "so a mip chain cannot be generated");
+    }
+
+    VkImageFormatProperties imageFormatProperties{};
+    if (vkGetPhysicalDeviceImageFormatProperties(
+        m_physicalDevice, kTextureFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        0, &imageFormatProperties) != VK_SUCCESS ||
+        imageFormatProperties.maxMipLevels < m_textureMipLevels) {
+        throw std::runtime_error(
+            "the device cannot provide the requested mip chain for the texture format");
+    }
+
+    const VkDeviceSize imageSize = static_cast<VkDeviceSize>(image.width) *
+        static_cast<VkDeviceSize>(image.height) * 4;
+
+    // 像素从主机内存来，所以上 GPU 的路和顶点/索引缓冲一样：staging 两段式。
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingBufferMemory = VK_NULL_HANDLE;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
+    void* data = nullptr;
+    vkMapMemory(m_device, stagingBufferMemory, 0, imageSize, 0, &data);
+    std::memcpy(data, image.pixels.data(), static_cast<size_t>(imageSize));
+    vkUnmapMemory(m_device, stagingBufferMemory);
+
+    // SRGB 而不是 UNORM：采样器在读取时把 sRGB 转成线性，交换链在写出时再转回去。
+    // 这一对弄错就是"贴图发白/发灰"的经典原因。
+    //
+    // TRANSFER_SRC 和 TRANSFER_DST 都要：mip 链是在同一张 image 内部逐层 blit 出来的。
+    CreateImage(image.width, image.height, m_textureMipLevels, kTextureFormat,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        m_textureImage, m_textureImageMemory);
+
+    // 整次上传只用一条命令缓冲：两次布局转换 + 缓冲拷贝 + 每个 mip 的 blit。
+    const VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+    TransitionImageLayout(commandBuffer, m_textureImage,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, 1);
+    CopyBufferToImage(commandBuffer, stagingBuffer, m_textureImage,
+        static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height));
+    GenerateMipmaps(commandBuffer, m_textureImage,
+        static_cast<int32_t>(image.width), static_cast<int32_t>(image.height),
+        m_textureMipLevels);
+    TransitionImageLayout(commandBuffer, m_textureImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        m_textureMipLevels - 1, 1);
+
+    EndSingleTimeCommands(commandBuffer);
+
+    DestroyBuffer(stagingBuffer, stagingBufferMemory);
+
+    // view 要覆盖整条链，否则采样器只能读到 level 0，生成的 mip 对它不可见。
+    m_textureImageView = CreateImageView(m_textureImage, kTextureFormat,
+        VK_IMAGE_ASPECT_COLOR_BIT, m_textureMipLevels);
+
+    CreateTextureSampler(m_textureMipLevels);
+}
+
+void VulkanRenderer::DestroyTextureResources()
+{
+    DestroyImage(m_textureImage, m_textureImageView, m_textureImageMemory, m_textureSampler);
+
+    m_textureWidth = 0;
+    m_textureHeight = 0;
+    m_textureMipLevels = 1;
+}
+
+void VulkanRenderer::ReloadTexture()
+{
+    // 可能失败的情况是文件写了一半被捕获，此时继续显示已经可用的纹理，让程序继续进行
+    Image image;
+    try {
+        image = LoadImage(TextureAssetPath());
+    }
+    catch (const std::exception& exception) {
+        std::cerr << "[hotreload] " << exception.what() << std::endl;
+        std::cerr << "[hotreload] keeping the previously loaded texture" << std::endl;
+        return;
+    }
+
+    // 在旧图像被销毁时，不能读取它，而且描述符会设置其视图。
+    // vkDeviceWaitIdle 比帧循环使用的栅栏等待更重，而且这里可能会发生一次重新加载，保守一些不会带来可测量的成本。
+    WaitIdle();
+
+    DestroyTextureResources();
+    UploadTexture(image);
+
+    // 描述符集仍然持有旧的图像视图：关于重新加载的其他一切都是纹理本地的，而这个不是。
+    // 忘记它会在下一帧产生验证错误或崩溃，而不会像看起来陈旧的纹理那么温和
+    WriteTextureDescriptors();
+
+    std::cout << "[hotreload] texture reloaded: " << m_textureWidth << "x" << m_textureHeight
+        << ", " << m_textureMipLevels << " mip levels" << std::endl;
 }
 
 void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
@@ -1916,6 +2028,37 @@ void VulkanRenderer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDevice
     vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
     EndSingleTimeCommands(commandBuffer);
+}
+
+void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+{
+    vkDestroyBuffer(m_device, buffer, nullptr);
+    vkFreeMemory(m_device, bufferMemory, nullptr);
+    buffer = VK_NULL_HANDLE;
+    bufferMemory = VK_NULL_HANDLE;
+}
+
+void VulkanRenderer::DestroyImage(VkImage& image, VkImageView& imageView, VkDeviceMemory& imageMemory, VkSampler& imageSampler)
+{
+    // 用参数，不要用成员：这个 helper 必须能销毁调用者给的那一份资源
+    // （写成 m_textureImageView 时它只对贴图"碰巧"有效，换成深度图就会销毁错的 view）。
+    // 顺序也不能换：view / sampler 都在 image 之前。
+    if (imageSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, imageSampler, nullptr);
+        imageSampler = VK_NULL_HANDLE;
+    }
+    if (imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, imageView, nullptr);
+        imageView = VK_NULL_HANDLE;
+    }
+    if (image != VK_NULL_HANDLE) {
+        vkDestroyImage(m_device, image, nullptr);
+        image = VK_NULL_HANDLE;
+    }
+    if (imageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, imageMemory, nullptr);
+        imageMemory = VK_NULL_HANDLE;
+    }
 }
 
 VkCommandBuffer VulkanRenderer::BeginSingleTimeCommands() {

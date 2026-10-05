@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -12,6 +12,8 @@
 #include "../Renderer.h"
 #include "scene/Vertex.h"
 #include "scene/MeshLibrary.h"
+#include "scene/Image.h"
+#include <platform/FileWatch.h>
 
 struct PushConstants
 {
@@ -86,10 +88,14 @@ private:
 	void CreateUniformBuffers();
 	void CreateDescriptorPool();
 	void CreateDescriptorSets();
+	void WriteTextureDescriptors();
 
 	void CreateTextureImage();
 	void GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage image,
 		int32_t width, int32_t height, uint32_t mipLevels) const;
+	void UploadTexture(const Image& image);
+	void DestroyTextureResources();
+	void ReloadTexture();
 	void CreateTextureSampler(uint32_t mipLevels);
 
 	// per frame
@@ -131,6 +137,9 @@ private:
 		uint32_t mipLevels) const;
 	void TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount) const;
 	void CopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
+	
+	void DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+	void DestroyImage(VkImage& image, VkImageView& imageView, VkDeviceMemory& imageMemory, VkSampler& imageSampler);
 
 	VkCommandBuffer BeginSingleTimeCommands();
 	void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
@@ -178,6 +187,8 @@ private:
 	std::vector<VkBuffer> m_uniformBuffers;
 	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
 	std::vector<void*> m_uniformBuffersMapped;
+
+	FileWatch m_textureWatch;
 
 	struct GpuMesh
 	{

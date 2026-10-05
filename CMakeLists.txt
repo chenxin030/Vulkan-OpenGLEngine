@@ -90,6 +90,7 @@ add_executable(Rebuild
     src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
     src/rhi/RendererFactory.cpp
+    src/platform/FileWatch.cpp
     src/platform/GlfwInput.cpp
     src/scene/CameraController.cpp
     src/scene/Image.cpp
