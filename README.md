@@ -52,7 +52,7 @@ cmake --build build --config Debug
 | D27 | `CameraController` + 接进主循环（WASD 飞起来） | ✔ `9529b2f` |
 | D32 | ECS：`Entity` + `Registry` + `Components` + `Systems` | ✔ `732d810` |
 | D33 | `MeshLibrary` + `GpuMesh` + 懒惰上传 | ✔ `6dd9412` |
-| D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ⬜ |
+| D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ✔ `abc1d69` |
 | D38 | 接 VMA + 每处主机写入后 flush | ⬜ |
 | D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ⬜ |
 
