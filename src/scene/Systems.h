@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 class Registry;
 
@@ -8,3 +8,7 @@ class Registry;
 void SpinSystem(Registry& registry, float deltaSeconds);
 
 void TransformSystem(Registry& registry);
+
+// 在 TransformSystem **之后**跑：它依赖 TransformSystem 的 pass 1 已经重置过 world。
+// 取绝对时间而不是 dt：浮动的相位不该被帧率影响。
+void BobSystem(Registry& registry, float elapsedSeconds);
