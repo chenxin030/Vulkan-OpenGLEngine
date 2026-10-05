@@ -1,4 +1,4 @@
-#include "vulkanRenderer.h"
+﻿#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -1282,8 +1282,8 @@ void VulkanRenderer::CreateTextureImage()
 
     UploadTexture(image);
 
-    // 基线必须在**首次加载成功之后**才打：打早了，第一帧的 ConsumeChanged()
-    // 就会为"刚刚加载的这个文件"返回 true，白白重载一次。
+    // 基线必须在首次加载成功之后才打：打早了，第一帧的 ConsumeChanged()
+    // 就会为刚刚加载的这个文件返回 true，白白重载一次。
     m_textureWatch.Reset(path);
 }
 
