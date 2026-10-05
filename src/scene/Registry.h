@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "scene/Entity.h"
 
@@ -69,8 +69,7 @@ private:
         {
             const auto it = slotOf.find(entity.index);
 
-            // 这次 generation 检查与 Destroy() 自己的存活性测试不是一回事：
-            // Detach 也会被**陈旧句柄直接**调用（Remove<T>），那时 Destroy 根本没跑过。
+            // Detach 也会被旧句柄直接调用（Remove<T>），那时 Destroy 根本没跑过。
             // 没有这道检查，一个槽位已被回收的句柄会分离掉当前占用者的组件。
             if (it == slotOf.end() || owners[it->second].generation != entity.generation) {
                 return;
@@ -118,9 +117,8 @@ private:
     std::vector<uint32_t> m_freeIndices;
     std::size_t m_liveCount = 0;
 
-    // One storage per component type, keyed by std::type_index. Type-erased behind
-    // IStorage so a single map can hold them all; the downcast in StorageFor() is
-    // checked by construction, because the key IS typeid(T).
+    // 每种组件类型一个存储，以 std::type_index 为键。
+    // 类型被 IStorage 擦除，所以一个 map 就能存放它们所有；StorageFor() 中的向下转换在构造时就会检查，因为键本身就是 typeid(T)。
     std::unordered_map<std::type_index, std::unique_ptr<IStorage>> m_storages;
 };
 
