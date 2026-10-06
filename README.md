@@ -70,6 +70,23 @@ cmake --build build --config Debug
 
 ---
 
+## 提交前（两条自查）
+
+```powershell
+git branch --show-current          # 必须输出 main；空输出 = 游离 HEAD，立刻停手
+git status --short                 # 应当只剩这次故意改的文件
+```
+
+> 游离 HEAD 是**真踩过**的坑：D32–D35 的提交一度全部落在游离链上，`main` 还停在 D32 之前
+> （因为每次只看提交输出的最后两行，没看分支名）。游离链是新提交时的恢复办法：
+> `git branch -f main HEAD; git checkout main`，恢复后逐个 verify：
+> `git merge-base --is-ancestor <hash> main`。
+
+**文件编码**：仓库对 BOM **不作要求**。VS 默认带 BOM 保存，脚本/工具写入的不带；
+两种都能编译、都能被 Obsidian 正常读取，因此**不为此翻动已有文件**（纯空白改动会搅浑历史）。
+
+---
+
 ## 验收命令（每个阶段都该是空的）
 
 ```powershell
