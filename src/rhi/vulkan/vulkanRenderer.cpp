@@ -1,4 +1,4 @@
-﻿#include "vulkanRenderer.h"
+#include "vulkanRenderer.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <fstream>
 #include <array>
+#include <cassert>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -248,7 +249,7 @@ void VulkanRenderer::DrawFrame(const Scene& scene) {
     BuildImGuiFrame();
     ImGui::Render();
 
-    UploadMeshes(scene.meshes);
+    EnsureMeshesUploaded(scene.meshes);
 
     RecordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex, scene);
 
@@ -1499,7 +1500,7 @@ void VulkanRenderer::CreateTextureSampler(uint32_t mipLevels)
     }
 }
 
-void VulkanRenderer::UploadMeshes(const MeshLibrary& meshes)
+void VulkanRenderer::EnsureMeshesUploaded(const MeshLibrary& meshes)
 {
     // 首次使用时懒加载，而不是在初始化时急切加载，因为初始化根本不知道世界里有什么
     // 而且一个必须先拿到网格列表才能开始的渲染器，就是一个坚持要提前知道整个世界的渲染器。
@@ -1584,6 +1585,10 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_currentFrame], 0, nullptr);
 
     for (const DrawItem& item : scene.drawItems) {
+        // meshIndex 是 MeshLibrary 的合法索引 —— 由构建场景那一侧用 k* 常量保证。
+        // 这里是坏句柄最终落地的地方：用 assert 而不是分支，debug 抓住、release 零成本。
+        assert(item.meshIndex < m_meshes.size() && "draw item references a mesh that was never uploaded");
+
         const GpuMesh& mesh = m_meshes[item.meshIndex];
 
         const VkBuffer vertexBuffers[] = { mesh.vertexBuffer };

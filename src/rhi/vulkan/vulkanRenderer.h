@@ -99,7 +99,8 @@ private:
 	void CreateTextureSampler(uint32_t mipLevels);
 
 	// per frame
-	void UploadMeshes(const MeshLibrary& meshes);
+	// 幂等的"确保已上传"：每帧调用，自己判断有没有新条目。
+	void EnsureMeshesUploaded(const MeshLibrary& meshes);
 	void UploadMesh(const MeshData& mesh, uint32_t meshIndex);
 	void UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene);
 	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene);
