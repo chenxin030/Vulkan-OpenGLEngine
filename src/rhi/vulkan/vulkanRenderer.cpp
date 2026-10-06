@@ -98,6 +98,8 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     PickPhysicalDevice();
     CreateLogicalDevice();
 
+    CreateAllocator();
+
     CreateSwapChain();
     CreateImageViews();
     CreateDepthResources();
@@ -106,9 +108,6 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateCommandBuffers();
 
     CreateTextureImage();
-    // 这里**不再**调 CreateTextureSampler()：上传（UploadTexture）自己会建采样器，
-    // 因为 mip 层数取决于刚加载的尺寸，而热重载必须能用新的层数重建它。
-    // 原来两处都调，第二次会覆盖句柄、把上传时建的那个采样器泄漏掉（关窗时验证层会报出来）。
 
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
@@ -143,32 +142,36 @@ void VulkanRenderer::Cleanup() {
         m_commandPool = VK_NULL_HANDLE;
     }
 
+    CleanupSwapChain();
+
+    DestroyTextureResources();
+
     for (GpuMesh& mesh : m_meshes) {
-        vkDestroyBuffer(m_device, mesh.vertexBuffer, nullptr);
-        vkDestroyBuffer(m_device, mesh.indexBuffer, nullptr);
-        vkFreeMemory(m_device, mesh.vertexBufferMemory, nullptr);
-        vkFreeMemory(m_device, mesh.indexBufferMemory, nullptr);
-        mesh.vertexBuffer = VK_NULL_HANDLE;
-        mesh.indexBuffer = VK_NULL_HANDLE;
-        mesh.vertexBufferMemory = VK_NULL_HANDLE;
-        mesh.indexBufferMemory = VK_NULL_HANDLE;
+        DestroyBuffer(mesh.vertexBuffer, mesh.vertexAllocation);
+        DestroyBuffer(mesh.indexBuffer, mesh.indexAllocation);
     }
     m_meshes.clear();
 
-    for (size_t i = 0; i < kMaxFramesInFlight; i++) {
-        vkDestroyBuffer(m_device, m_uniformBuffers[i], nullptr);
-        vkFreeMemory(m_device, m_uniformBuffersMemory[i], nullptr);
+    for (size_t i = 0; i < m_uniformBuffers.size(); ++i) {
+        DestroyBuffer(m_uniformBuffers[i], m_uniformBufferAllocations[i]);
+    }
+    m_uniformBuffers.clear();
+    m_uniformBufferAllocations.clear();
+    m_uniformBuffersMapped.clear();
+
+    if (m_descriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+        m_descriptorPool = VK_NULL_HANDLE;
+    }
+    if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
+        m_descriptorSetLayout = VK_NULL_HANDLE;
     }
 
-    vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
-
-    CleanupSwapChain();
-
-    vkDestroySampler(m_device, m_textureSampler, nullptr);
-    vkDestroyImageView(m_device, m_textureImageView, nullptr);
-    vkDestroyImage(m_device, m_textureImage, nullptr);
-    vkFreeMemory(m_device, m_textureImageMemory, nullptr);
+    if (m_allocator != nullptr) {
+        vmaDestroyAllocator(m_allocator);
+        m_allocator = nullptr;
+    }
 
     if (m_device != VK_NULL_HANDLE) {
         vkDestroyDevice(m_device, nullptr);
@@ -629,13 +632,16 @@ void VulkanRenderer::CreateUniformBuffers()
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
     m_uniformBuffers.resize(kMaxFramesInFlight);
-    m_uniformBuffersMemory.resize(kMaxFramesInFlight);
+    m_uniformBufferAllocations.resize(kMaxFramesInFlight);
     m_uniformBuffersMapped.resize(kMaxFramesInFlight);
 
     for (size_t i = 0; i < kMaxFramesInFlight; i++) {
-        CreateBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_uniformBuffers[i], m_uniformBuffersMemory[i]);
+        VmaAllocationInfo allocationInfo{};
+        CreateBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, MemoryUse::HostVisible, m_uniformBuffers[i], m_uniformBufferAllocations[i], &allocationInfo);
 
-        vkMapMemory(m_device, m_uniformBuffersMemory[i], 0, bufferSize, 0, &m_uniformBuffersMapped[i]);
+        // 映射一次后再也不取消映射。旧代码调用 vkMapMemory 来实现相同的效果；
+        // 使用 VMA 时，映射在创建时就请求好了，指针可以直接从分配信息中读出。
+        m_uniformBuffersMapped[i] = allocationInfo.pMappedData;
     }
 }
 
@@ -931,20 +937,6 @@ VkExtent2D VulkanRenderer::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capa
     return actualExtent;
 }
 
-uint32_t VulkanRenderer::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
-{
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-    throw std::runtime_error("failed to find suitable memory type!");
-
-}
-
 void VulkanRenderer::CreateImageViews() {
     m_swapChainImageViews.resize(m_swapChainImages.size());
 
@@ -972,7 +964,8 @@ void VulkanRenderer::CreateImageViews() {
 
 void VulkanRenderer::CreateDepthResources() {
     VkFormat depthFormat = FindDepthFormat();
-    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthImageMemory);
+    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL, 
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, m_depthImage, m_depthImageAllocation);
     m_depthImageView = CreateImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
@@ -1150,14 +1143,15 @@ void VulkanRenderer::CreateFramebuffers()
 
 void VulkanRenderer::DestroySwapChainResources()
 {
-    vkDestroyImageView(m_device, m_depthImageView, nullptr);
-    vkDestroyImage(m_device, m_depthImage, nullptr);
-    vkFreeMemory(m_device, m_depthImageMemory, nullptr);
-    m_depthImage = VK_NULL_HANDLE;;
-    m_depthImageMemory = VK_NULL_HANDLE;
-    m_depthImageView = VK_NULL_HANDLE;;
-
     DestroyRenderFinishedSemaphores();
+
+    if (m_depthImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, m_depthImageView, nullptr);
+        m_depthImageView = VK_NULL_HANDLE;
+    }
+    vmaDestroyImage(m_allocator, m_depthImage, m_depthImageAllocation);
+    m_depthImage = VK_NULL_HANDLE;
+    m_depthImageAllocation = nullptr;
 
     for (const VkFramebuffer framebuffer : m_swapChainFramebuffers) {
         vkDestroyFramebuffer(m_device, framebuffer, nullptr);
@@ -1387,16 +1381,14 @@ void VulkanRenderer::UploadTexture(const Image& image)
         static_cast<VkDeviceSize>(image.height) * 4;
 
     // 像素从主机内存来，所以上 GPU 的路和顶点/索引缓冲一样：staging 两段式。
-    VkBuffer stagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory stagingBufferMemory = VK_NULL_HANDLE;
-    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingBuffer, stagingBufferMemory);
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;    
+    VmaAllocation stagingAllocation = nullptr;
+    VmaAllocationInfo stagingInfo{};
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryUse::HostVisible,
+        stagingBuffer, stagingAllocation, &stagingInfo);
 
-    void* data = nullptr;
-    vkMapMemory(m_device, stagingBufferMemory, 0, imageSize, 0, &data);
-    std::memcpy(data, image.pixels.data(), static_cast<size_t>(imageSize));
-    vkUnmapMemory(m_device, stagingBufferMemory);
+    std::memcpy(stagingInfo.pMappedData, image.pixels.data(), static_cast<size_t>(imageSize));
+    vmaFlushAllocation(m_allocator, stagingAllocation, 0, imageSize);
 
     // SRGB 而不是 UNORM：采样器在读取时把 sRGB 转成线性，交换链在写出时再转回去。
     // 这一对弄错就是"贴图发白/发灰"的经典原因。
@@ -1406,8 +1398,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
         VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        m_textureImage, m_textureImageMemory);
+        m_textureImage, m_textureImageAllocation);
 
     // 整次上传只用一条命令缓冲：两次布局转换 + 缓冲拷贝 + 每个 mip 的 blit。
     const VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
@@ -1425,7 +1416,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
 
     EndSingleTimeCommands(commandBuffer);
 
-    DestroyBuffer(stagingBuffer, stagingBufferMemory);
+    DestroyBuffer(stagingBuffer, stagingAllocation);
 
     // view 要覆盖整条链，否则采样器只能读到 level 0，生成的 mip 对它不可见。
     m_textureImageView = CreateImageView(m_textureImage, kTextureFormat,
@@ -1436,7 +1427,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
 
 void VulkanRenderer::DestroyTextureResources()
 {
-    DestroyImage(m_textureImage, m_textureImageView, m_textureImageMemory, m_textureSampler);
+    DestroyImage(m_textureImage, m_textureImageView, m_textureImageAllocation, m_textureSampler);
 
     m_textureWidth = 0;
     m_textureHeight = 0;
@@ -1525,12 +1516,12 @@ void VulkanRenderer::UploadMesh(const MeshData& mesh, uint32_t meshIndex)
     UploadToDeviceLocal(mesh.vertices.data(),
         sizeof(Vertex) * mesh.vertices.size(),
         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        gpuMesh.vertexBuffer, gpuMesh.vertexBufferMemory);
+        gpuMesh.vertexBuffer, gpuMesh.vertexAllocation);
 
     UploadToDeviceLocal(mesh.indices.data(),
         sizeof(uint16_t) * mesh.indices.size(),
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        gpuMesh.indexBuffer, gpuMesh.indexBufferMemory);
+        gpuMesh.indexBuffer, gpuMesh.indexAllocation);
 
     gpuMesh.indexCount = static_cast<uint32_t>(mesh.indices.size());
 }
@@ -1544,6 +1535,10 @@ void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene
     ubo.proj = scene.camera.ProjectionMatrix(aspect);
     ubo.proj[1][1] *= -1.0f;
     memcpy(m_uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
+
+    // 和暂存上传一样的道理：一致性不再是分配请求所保证的，所以每次主机写入之后都会紧跟一次显式刷新。
+    // 在一致性内存上这是无操作的，而在非一致性内存上，如果省略它，GPU 就会渲染缓冲区之前存储的内容。
+    vmaFlushAllocation(m_allocator, m_uniformBufferAllocations[frameIndex], 0, sizeof(ubo));
 }
 
 void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene) {
@@ -1830,26 +1825,29 @@ void VulkanRenderer::CreateRenderPass()
 
 void VulkanRenderer::UploadToDeviceLocal(const void* source, VkDeviceSize size,
     VkBufferUsageFlags usage,
-    VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+    VkBuffer& buffer, VmaAllocation& allocation)
 {
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VmaAllocation stagingAllocation = nullptr;
+    VmaAllocationInfo stagingInfo{};
 
-    void* data;
-    vkMapMemory(m_device, stagingBufferMemory, 0, size, 0, &data);
-    memcpy(data, source, (size_t)size);
-    vkUnmapMemory(m_device, stagingBufferMemory);
+    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryUse::HostVisible, stagingBuffer, stagingAllocation, &stagingInfo);
 
-    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, bufferMemory);
+    std::memcpy(stagingInfo.pMappedData, source, static_cast<size_t>(size));
+
+    vmaFlushAllocation(m_allocator, stagingAllocation, 0, size);
+
+    CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage, MemoryUse::DeviceLocal, buffer, allocation);
 
     CopyBuffer(stagingBuffer, buffer, size);
 
-    vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-    vkFreeMemory(m_device, stagingBufferMemory, nullptr);
+    // 必须走 DestroyBuffer：这块 staging buffer 的内存归 VMA 管，
+    // 直接 vkDestroyBuffer 只会销毁 buffer 对象，VMA 那边仍以为 allocation 活着 ——
+    // 于是 vmaDestroyAllocator 时会断言 "Some allocations were not freed"。
+    DestroyBuffer(stagingBuffer, stagingAllocation);
 }
 
-void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
+void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation)
 {
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1866,23 +1864,14 @@ void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLe
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateImage(m_device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+    // 这个引擎创建的图像都没有主机可见的用途。纹理是通过暂存缓冲区传入的，而深度缓冲区根本不会离开 GPU。
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    if (vmaCreateImage(m_allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr)
+        != VK_SUCCESS) {
         throw std::runtime_error("failed to create image!");
     }
-
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(m_device, image, &memRequirements);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
-
-    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate image memory!");
-    }
-
-    vkBindImageMemory(m_device, image, imageMemory, 0);
 }
 
 VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format,
@@ -1999,30 +1988,51 @@ void VulkanRenderer::CopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer b
     );
 }
 
-void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, MemoryUse memoryUse, 
+                                  VkBuffer& buffer, VmaAllocation& allocation, VmaAllocationInfo* allocationInfo) const {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
     bufferInfo.usage = usage;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+    VmaAllocationCreateInfo allocInfo{};
+    switch (memoryUse) {
+    case MemoryUse::DeviceLocal:
+        // 更倾向于使用设备而不是严格要求仅使用 GPU。VMA允许在设备本地堆无法满足请求时回退到主机内存，
+        // 而且一个仍然可用的回退方案总比直接失败要好——这是人工编写的内存类型搜索根本无法表达的权衡。
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        break;
+
+    case MemoryUse::HostVisible:
+        // 同时映射和主机访问，指针来自 VmaAllocationInfo::pMappedData。
+        // 这绕过了一个问题，即映射调用返回的是分配的起始地址还是缓冲区的起始地址：pMappedData 明确就是缓冲区。
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+            VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        break;
+    }
+    // 在一次调用中分配并绑定，同时检查每个中间结果。
+    // 它替代之前的四个调用：vkCreateBuffer → vkGetBufferMemoryRequirements → vkAllocateMemory → vkBindBufferMemory，
+    // vkBindBufferMemory的结果一般没人检查，绑定失败会在后面表现为垃圾几何体，而不是报错。
+    if (vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo, &buffer, &allocation, allocationInfo)
+        != VK_SUCCESS) {
         throw std::runtime_error("failed to create buffer!");
     }
+}
 
-    VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(m_device, buffer, &memRequirements);
+void VulkanRenderer::CreateAllocator()
+{
+    VmaAllocatorCreateInfo allocatorInfo{};
+    // 对应 Instance 的版本，VMA 使用 Vulkan 1.2的入口点（vkBindBufferMemory2、vkGetBufferMemoryRequirements2、...）
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_2;
+    allocatorInfo.physicalDevice = m_physicalDevice;
+    allocatorInfo.device = m_device;
+    allocatorInfo.instance = m_instance;
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
-
-    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate buffer memory!");
+    if (vmaCreateAllocator(&allocatorInfo, &m_allocator) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create the Vulkan memory allocator!");
     }
-
-    vkBindBufferMemory(m_device, buffer, bufferMemory, 0);
 }
 
 void VulkanRenderer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
@@ -2035,15 +2045,15 @@ void VulkanRenderer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDevice
     EndSingleTimeCommands(commandBuffer);
 }
 
-void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VmaAllocation& allocation)
 {
-    vkDestroyBuffer(m_device, buffer, nullptr);
-    vkFreeMemory(m_device, bufferMemory, nullptr);
+    // 空指针是安全的
+    vmaDestroyBuffer(m_allocator, buffer, allocation);
     buffer = VK_NULL_HANDLE;
-    bufferMemory = VK_NULL_HANDLE;
+    allocation = nullptr;
 }
 
-void VulkanRenderer::DestroyImage(VkImage& image, VkImageView& imageView, VkDeviceMemory& imageMemory, VkSampler& imageSampler)
+void VulkanRenderer::DestroyImage(VkImage& image, VkImageView& imageView, VmaAllocation& allocation, VkSampler& imageSampler)
 {
     // 用参数，不要用成员：这个 helper 必须能销毁调用者给的那一份资源
     // （写成 m_textureImageView 时它只对贴图"碰巧"有效，换成深度图就会销毁错的 view）。
@@ -2056,14 +2066,9 @@ void VulkanRenderer::DestroyImage(VkImage& image, VkImageView& imageView, VkDevi
         vkDestroyImageView(m_device, imageView, nullptr);
         imageView = VK_NULL_HANDLE;
     }
-    if (image != VK_NULL_HANDLE) {
-        vkDestroyImage(m_device, image, nullptr);
-        image = VK_NULL_HANDLE;
-    }
-    if (imageMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(m_device, imageMemory, nullptr);
-        imageMemory = VK_NULL_HANDLE;
-    }
+    vmaDestroyImage(m_allocator, image, allocation);
+    image = VK_NULL_HANDLE;
+    allocation = nullptr;
 }
 
 VkCommandBuffer VulkanRenderer::BeginSingleTimeCommands() {

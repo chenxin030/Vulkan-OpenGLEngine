@@ -13,7 +13,19 @@
 #include "scene/Vertex.h"
 #include "scene/MeshLibrary.h"
 #include "scene/Image.h"
-#include <platform/FileWatch.h>
+#include "platform/FileWatch.h"
+
+#include <vk_mem_alloc.h>
+
+enum class MemoryUse
+{
+	// 先通过暂存缓冲区由 CPU 写入一次，然后由 GPU 读取。
+	DeviceLocal,
+
+	// CPU 写入，GPU 读取：暂存缓冲区和每帧 uniform buffer。
+	// 创建时已映射，所以指针来自 VmaAllocationInfo::pMappedData，而不是单独的 vmaMapMemory 调用。
+	HostVisible,
+};
 
 struct PushConstants
 {
@@ -127,20 +139,22 @@ private:
 		VkFormatFeatureFlags features) const;
 	VkShaderModule CreateShaderModule(const std::vector<char>& code) const;
 
-	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+	void CreateAllocator();
+
+	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, MemoryUse memoryUse, VkBuffer& buffer, VmaAllocation& allocation, VmaAllocationInfo* allocationInfo = nullptr) const;
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 
 	void UploadToDeviceLocal(const void* source, VkDeviceSize size,
 		VkBufferUsageFlags usage,
-		VkBuffer& buffer, VkDeviceMemory& bufferMemory);
-	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory);
+		VkBuffer& buffer, VmaAllocation& allocation);
+	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
 		uint32_t mipLevels) const;
 	void TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount) const;
 	void CopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 	
-	void DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& bufferMemory);
-	void DestroyImage(VkImage& image, VkImageView& imageView, VkDeviceMemory& imageMemory, VkSampler& imageSampler);
+	void DestroyBuffer(VkBuffer& buffer, VmaAllocation& allocation);
+	void DestroyImage(VkImage& image, VkImageView& imageView, VmaAllocation& allocation, VkSampler& imageSampler);
 
 	VkCommandBuffer BeginSingleTimeCommands();
 	void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
@@ -149,8 +163,6 @@ private:
 	VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
 	VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) const;
 	VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) const;
-
-	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
 	// member
 	GLFWwindow* m_window;
@@ -172,8 +184,10 @@ private:
 	std::vector<VkImageView> m_swapChainImageViews;
 	std::vector<VkFramebuffer> m_swapChainFramebuffers;
 
+	VmaAllocator m_allocator = nullptr;
+
 	VkImage m_depthImage = VK_NULL_HANDLE;
-	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
+	VmaAllocation m_depthImageAllocation = nullptr;
 	VkImageView m_depthImageView = VK_NULL_HANDLE;
 
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
@@ -186,19 +200,18 @@ private:
 	std::vector<VkDescriptorSet> m_descriptorSets;
 
 	std::vector<VkBuffer> m_uniformBuffers;
-	std::vector<VkDeviceMemory> m_uniformBuffersMemory;
+	std::vector<VmaAllocation> m_uniformBufferAllocations;
 	std::vector<void*> m_uniformBuffersMapped;
 
 	FileWatch m_textureWatch;
 
 	struct GpuMesh
 	{
-		VkBuffer vertexBuffer = VK_NULL_HANDLE;
-		VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
-		VkBuffer indexBuffer = VK_NULL_HANDLE;
-		VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
-
-		uint32_t indexCount = 0;
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VmaAllocation vertexAllocation = nullptr;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VmaAllocation indexAllocation = nullptr;
+        uint32_t indexCount = 0;
 	};
 	std::vector<GpuMesh> m_meshes;
 
@@ -206,7 +219,7 @@ private:
 	std::vector<VkCommandBuffer> m_commandBuffers;
 
 	VkImage m_textureImage = VK_NULL_HANDLE;
-	VkDeviceMemory m_textureImageMemory;
+	VmaAllocation m_textureImageAllocation = nullptr;
 	VkImageView m_textureImageView = VK_NULL_HANDLE;
 	VkSampler m_textureSampler = VK_NULL_HANDLE;
 	uint32_t m_textureWidth = 0;

@@ -33,8 +33,20 @@ FetchContent_Declare(imgui
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20)
+# stb 故意不写 GIT_SHALLOW：浅克隆只能取分支或 tag 的尖端，取不到任意 commit 哈希。
+# stb 很小，全量克隆的代价不值得优化。
 
-FetchContent_MakeAvailable(glfw imgui stb)
+# VulkanMemoryAllocator：header-only，实现在我们自己的一个 TU 里
+# （src/rhi/vulkan/vulkan_memory.cpp），所以没有 target 可以 link —— 只有一个 include 目录要指。
+#
+# 这个 tag 找不到时，先列出有哪些 tag 再钉一个：
+#   git ls-remote --tags https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+FetchContent_Declare(vma
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG        v3.1.0
+    GIT_SHALLOW    TRUE)
+
+FetchContent_MakeAvailable(glfw imgui stb vma)
 
 if(Vulkan_GLSLC_EXECUTABLE)
     set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
@@ -87,6 +99,7 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
 
 add_executable(Rebuild
+    src/rhi/vulkan/vulkan_memory.cpp
     src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
     src/rhi/RendererFactory.cpp
@@ -113,6 +126,7 @@ endif()
 target_include_directories(Rebuild PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${stb_SOURCE_DIR}"
+    "${vma_SOURCE_DIR}/include"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends")
 
