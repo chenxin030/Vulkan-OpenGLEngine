@@ -55,7 +55,7 @@ cmake --build build --config Debug
 | D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ✔ `abc1d69` |
 | D35 | 练习：加圆柱体 + `Bob` 与 `BobSystem`（形状 A→B） | ✔ `89cfe4a` |
 | D38 | 接 VMA + 每处主机写入后 flush | ✔ `a68d088` |
-| D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ⬜ |
+| D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ✔ `31dde49` |
 
 > 验收记录（证据、命令、判据）在 `notes\` 下，每个增量一份；`notes/` 不入库。
 >
