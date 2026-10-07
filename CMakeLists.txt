@@ -13,6 +13,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 find_package(Vulkan REQUIRED)
+# OpenGL 后端用（D41–D42）：Windows 上它给的是 opengl32，只需要链接即可 ——
+# 1.1 以上的入口点在运行时由我们自己的加载器取（见 src/rhi/opengl/openglFunctions.h）。
+find_package(OpenGL REQUIRED)
 include(FetchContent)
 
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -96,9 +99,14 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/imgui_tables.cpp"
     "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
     "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
-    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
+    # 第二个后端的 ImGui 半边（D41 接上；它自带一个最小的 GL 加载器，不需要额外依赖）。
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
 
 add_executable(Rebuild
+    # 第二个后端。它存在的意义是检验 Renderer 接口是不是真的与后端无关 ——
+    # 所以它和第一个并列放在这里。
+    src/rhi/opengl/openglRenderer.cpp
     src/rhi/vulkan/vulkan_memory.cpp
     src/rhi/vulkan/vulkanRenderer.cpp
     src/main.cpp
@@ -132,12 +140,16 @@ target_include_directories(Rebuild PRIVATE
 
 target_compile_definitions(Rebuild PRIVATE
     SHADER_DIR="${SHADER_OUTPUT_DIR}"
+    # OpenGL 在**运行时**自己编译 GLSL，所以它要的是源码目录，而不是 .spv 目录。
+    # 两个后端，两个答案：GLSL 什么时候变成机器码。
+    SHADER_SOURCE_DIR="${SHADER_SOURCE_DIR}"
     ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 target_link_libraries(Rebuild PRIVATE
     glfw
+    OpenGL::GL
     Vulkan::Vulkan)
 
 if(MSVC)

@@ -1,5 +1,6 @@
-﻿#include "RendererFactory.h"
+#include "RendererFactory.h"
 #include "Renderer.h"
+#include "opengl/openglRenderer.h"
 #include "vulkan/vulkanRenderer.h"
 
 std::unique_ptr<Renderer> CreateRenderer(GraphicAPIType type)
@@ -12,6 +13,6 @@ std::unique_ptr<Renderer> CreateRenderer(GraphicAPIType type)
 	else
 	{
 		std::cout << "[renderer] backend: OpenGL" << std::endl;
-		throw std::runtime_error("the OpenGL backend is not implemented yet");
+		return std::make_unique<OpenGLRenderer>();
 	}
 }

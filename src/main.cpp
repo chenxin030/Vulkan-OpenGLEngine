@@ -1,4 +1,4 @@
-﻿#include "platform/GlfwInput.h"
+#include "platform/GlfwInput.h"
 #include "rhi/Renderer.h"
 #include "rhi/RendererFactory.h"
 #include "scene/CameraController.h"
@@ -20,8 +20,10 @@ static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, i
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GLFW_TRUE);
 }
-int main()
+int main(int argc, char** argv)
 {
+    const std::string backendName = (argc > 1) ? argv[1] : std::string();
+
     glfwSetErrorCallback(GlfwErrorCallback);
     if (!glfwInit()) {
         std::cerr << "ERROR: GLFW init\n";
@@ -32,8 +34,13 @@ int main()
     int exitCode = EXIT_SUCCESS;
 
     try {
-        std::unique_ptr<Renderer> renderer = CreateRenderer(GraphicAPIType::VULKAN);
+        // 后端由命令行选：`Rebuild.exe opengl` 走 OpenGL，无参数（或别的）走 Vulkan。
+        // 这一行必须在 ConfigureWindowHints() 之前 —— 窗口提示取决于选了哪个后端。
+        const GraphicAPIType apiType =
+            (backendName == "opengl") ? GraphicAPIType::OPENGL : GraphicAPIType::VULKAN;
+        std::unique_ptr<Renderer> renderer = CreateRenderer(apiType);
         renderer->ConfigureWindowHints();
+
         window = glfwCreateWindow(1600, 900, "Engine", NULL, NULL);
         if (!window)
             throw std::runtime_error("ERROR: GLFW window create");

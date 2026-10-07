@@ -1556,7 +1556,11 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
     renderPassInfo.renderArea.extent = m_swapChainExtent;
 
     std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+    // 和 OpenGL 后端用**同一个背景色**（那边是 glClearColor）。两个后端画同一个场景，
+    // 所以"背景算不算画面的一部分"这个问题现在有答案了：算。
+    // 这个值目前**没有单一归属**（两边各写一份，改一处就要改另一处）—— 要不要把它提到
+    // Renderer 接口上，是 `07`"下一步"练习 3 那个问题（SetClearColor 该不该长出来）。
+    clearValues[0].color = { {0.05f, 0.06f, 0.09f, 1.0f} };
     clearValues[1].depthStencil = { 1.0f, 0 };
     renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());;
     renderPassInfo.pClearValues = clearValues.data();
