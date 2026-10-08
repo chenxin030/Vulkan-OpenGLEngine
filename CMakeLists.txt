@@ -5,6 +5,8 @@ project(Rebuild
     DESCRIPTION "From-scratch rebuild of the mini engine - D5/D6: swap chain, render pass, shaders"
     LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -120,6 +122,14 @@ add_executable(Rebuild
     src/scene/Scene.cpp
     src/scene/Systems.cpp
     ${IMGUI_SOURCES})
+
+if(BUILD_TESTING)
+    add_executable(RebuildTests
+        tests/RegistryTests.cpp
+        src/scene/Registry.cpp)
+    target_include_directories(RebuildTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_test(NAME Rebuild.Registry COMMAND RebuildTests)
+endif()
 
 add_dependencies(Rebuild RebuildShaders)
 
