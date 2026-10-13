@@ -1,13 +1,17 @@
+﻿#include "editor/Editor.h"
 #include "platform/GlfwInput.h"
 #include "rhi/Renderer.h"
 #include "rhi/RendererFactory.h"
 #include "scene/CameraController.h"
+#include "scene/RenderSnapshot.h"
 #include "scene/Scene.h"
+#include "scene/SceneUpdater.h"
 
 #include <GLFW/glfw3.h>
 
 #include <stdexcept>
 #include <cstdlib>
+#include <optional>
 
 // helper
 void GlfwErrorCallback(int error, const char* description)
@@ -15,11 +19,6 @@ void GlfwErrorCallback(int error, const char* description)
     std::cerr << "[glfw] (" << error << ") " << description << std::endl;
 }
 
-static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
-{
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-}
 int main(int argc, char** argv)
 {
     const std::string backendName = (argc > 1) ? argv[1] : std::string();
@@ -34,21 +33,21 @@ int main(int argc, char** argv)
     int exitCode = EXIT_SUCCESS;
 
     try {
-        // 后端由命令行选：`Rebuild.exe opengl` 走 OpenGL，无参数（或别的）走 Vulkan。
-        // 这一行必须在 ConfigureWindowHints() 之前 —— 窗口提示取决于选了哪个后端。
         const GraphicAPIType apiType =
             (backendName == "opengl") ? GraphicAPIType::OPENGL : GraphicAPIType::VULKAN;
         std::unique_ptr<Renderer> renderer = CreateRenderer(apiType);
         renderer->ConfigureWindowHints();
 
-        window = glfwCreateWindow(1600, 900, "Engine", NULL, NULL);
+        window = glfwCreateWindow(720, 440, "Engine", NULL, NULL);
         if (!window)
             throw std::runtime_error("ERROR: GLFW window create");
-        glfwSetKeyCallback(window, KeyCallback);
-
-        Scene scene = BuildDemoScene();
+        Scene scene = BuildDemo2DScene();
+        std::optional<Scene> runtimeScene;
+        SceneUpdater editUpdater;
+        SceneUpdater runtimeUpdater;
         GlfwInput input(window);
         const CameraController cameraController;
+        Editor editor;
 
         renderer->Init(window);
 
@@ -62,11 +61,24 @@ int main(int argc, char** argv)
             const float deltaSeconds = static_cast<float>(now - previousTime);
             previousTime = now;
 
-            const InputState inputState = input.Sample();
-            cameraController.Update(scene.camera, inputState, deltaSeconds);
-            scene.Update(deltaSeconds);
+            const InputState inputState = input.Sample(editor.InputCapture());
+            if (inputState.quitRequested) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            Scene& activeScene = editor.ActiveScene(scene, runtimeScene);
+            cameraController.Update(activeScene.camera, inputState, deltaSeconds);
+            (runtimeScene ? runtimeUpdater : editUpdater).Update(activeScene, deltaSeconds);
 
-            renderer->DrawFrame(scene);
+            const RenderSnapshot renderSnapshot = BuildRenderSnapshot(activeScene);
+            renderer->DrawFrame(renderSnapshot, [&editor, &activeScene, &runtimeScene, window] {
+                // 投影宽高比取实际像素尺寸；UI 鼠标坐标仍使用 ImGui 的逻辑坐标。
+                int width = 0, height = 0;
+                glfwGetFramebufferSize(window, &width, &height);
+                editor.Draw(activeScene, runtimeScene.has_value(), glm::vec2(width, height));
+            });
+            const bool wasPlaying = runtimeScene.has_value();
+            editor.ApplyPending(scene, runtimeScene);
+            if (wasPlaying != runtimeScene.has_value()) runtimeUpdater = SceneUpdater{};
         }
         renderer->WaitIdle();
         renderer->Cleanup();

@@ -1,8 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include <glm/glm.hpp>
+#include "scene/Entity.h"
 
 #include <cstdint>
+#include <string>
 
 struct Transform
 {
@@ -13,6 +15,22 @@ struct Transform
 struct MeshRenderer
 {
     uint32_t meshIndex = 0;   // index to mesh type, such as cube/plane/sphere
+    uint32_t materialIndex = 0;
+};
+
+struct Name
+{
+    std::string value;
+};
+
+struct Parent
+{
+    Entity entity;
+};
+
+struct SpriteRenderer
+{
+    glm::vec3 tint{ 1.0f };
 };
 
 struct Spin
@@ -22,7 +40,7 @@ struct Spin
     float angle = 0.0f;   // accumulated
 };
 
-// 上下浮动。和 Spin 的关键差别：这里不累加自己的状态，而是由**世界时钟**算绝对位移
+// 上下浮动。和 Spin 的关键差别：这里不累加自己的状态，而是由世界时钟算绝对位移
 // （sin(elapsed * speed + phase)）—— 结果只依赖 t，不会因为某一帧卡顿而漂移。
 struct Bob
 {

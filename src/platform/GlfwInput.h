@@ -28,7 +28,7 @@ public:
     GlfwInput& operator=(const GlfwInput&) = delete;
 
     // 对当前状态进行采样并推进存储的光标位置。
-    InputState Sample();
+    InputState Sample(const EditorInputCapture& capture);
 
 private:
     GLFWwindow* m_window = nullptr;

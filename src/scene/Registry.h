@@ -21,12 +21,23 @@
 class Registry
 {
 public:
+    Registry() = default;
+    Registry(const Registry& other);
+    Registry& operator=(const Registry& other);
+    Registry(Registry&&) noexcept = default;
+    Registry& operator=(Registry&&) noexcept = default;
+
+    void Swap(Registry& other) noexcept;
+
     Entity Create();
 
     // 销毁实体并分离它拥有的每个组件
     void Destroy(Entity entity);
 
     bool IsAlive(Entity entity) const;
+
+    template <typename Fn>
+    void ForEachEntity(Fn&& fn) const;
 
     template <typename T, typename... Args>
     T& Add(Entity entity, Args&&... args);
@@ -56,6 +67,7 @@ private:
     {
         virtual ~IStorage() = default;
         virtual void Detach(Entity entity) = 0;
+        virtual std::unique_ptr<IStorage> Clone() const = 0;
     };
 
     template <typename T>
@@ -64,6 +76,11 @@ private:
         std::vector<Entity> owners;                        // parallel to components
         std::vector<T> components;
         std::unordered_map<uint32_t, std::size_t> slotOf;  // entity index -> slot
+
+        std::unique_ptr<IStorage> Clone() const override
+        {
+            return std::make_unique<Storage<T>>(*this);
+        }
 
         void Detach(Entity entity) override
         {
@@ -141,6 +158,16 @@ Registry::Storage<T>& Registry::StorageFor()
     Storage<T>& reference = *storage;
     m_storages.emplace(key, std::move(storage));
     return reference;
+}
+
+template <typename Fn>
+void Registry::ForEachEntity(Fn&& fn) const
+{
+    for (std::size_t index = 0; index < m_alive.size(); ++index) {
+        if (m_alive[index]) {
+            fn(Entity{ static_cast<uint32_t>(index), m_generations[index] });
+        }
+    }
 }
 
 template <typename T>

@@ -1,7 +1,7 @@
 #include "openglRenderer.h"
 
-#include "scene/Image.h"
-#include "scene/Scene.h"
+#include "scene/MaterialLibrary.h"
+#include "scene/RenderSnapshot.h"
 #include "scene/Vertex.h"
 
 #include <imgui.h>
@@ -25,7 +25,18 @@ namespace {
     {
         glm::mat4 view;
         glm::mat4 proj;
+        glm::vec4 cameraPosition;
+        glm::vec4 lightDirection;
+        glm::vec4 lightColor;
+        glm::mat4 lightViewProjection;
+        glm::mat4 inverseViewProjection;
+        glm::vec4 environment;
+        glm::vec4 lightingTerms;
+        glm::vec4 framebufferSize;
+
     };
+    static_assert(offsetof(GlCameraUniforms, environment) == 304 && sizeof(GlCameraUniforms) == 352,
+        "environment camera UBO must match std140 shader offsets");
 
     const char* GlStringOrUnknown(const unsigned char* value)
     {
@@ -125,40 +136,100 @@ void OpenGLRenderer::Init(GLFWwindow* window)
     m_gl.glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
     CreateShaderProgram();
+    const GLuint toneVertex = CompileShader(GL_VERTEX_SHADER,
+        ReadTextFile(ShaderSourcePath("gl_tonemap.vert")), ShaderSourcePath("gl_tonemap.vert"));
+    const GLuint toneFragment = CompileShader(GL_FRAGMENT_SHADER,
+        ReadTextFile(ShaderSourcePath("gl_tonemap.frag")), ShaderSourcePath("gl_tonemap.frag"));
+    m_tonemapProgram = m_gl.glCreateProgram();
+    m_gl.glAttachShader(m_tonemapProgram, toneVertex);
+    m_gl.glAttachShader(m_tonemapProgram, toneFragment);
+    m_gl.glLinkProgram(m_tonemapProgram);
+    m_gl.glDeleteShader(toneVertex);
+    m_gl.glDeleteShader(toneFragment);
+    GLint toneLinked = GL_FALSE;
+    m_gl.glGetProgramiv(m_tonemapProgram, GL_LINK_STATUS, &toneLinked);
+    if (toneLinked != GL_TRUE) throw std::runtime_error("failed to link tone-map shader");
+    m_hdrColorLocation = m_gl.glGetUniformLocation(m_tonemapProgram, "uHdrColor");
+    if (m_hdrColorLocation < 0) throw std::runtime_error("tone-map shader is missing uHdrColor");
+    m_gl.glGenVertexArrays(1, &m_fullscreenVertexArray);
     CreateTexture();
+    CreateShadowResources();
+    int framebufferWidth = 0, framebufferHeight = 0;
+    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+    ResizeHdrTarget(framebufferWidth, framebufferHeight);
     InitImGui();
 }
 
-void OpenGLRenderer::DrawFrame(const Scene& scene)
+void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
+    const std::function<void()>& drawEditorUi)
 {
     // 热重载，每个后端按自己的方式引擎特性的实现。
     if (m_textureWatch.ConsumeChanged()) {
         ReloadTexture();
     }
 
-    EnsureMeshesUploaded(scene.meshes);
-    UpdateCameraUniforms(scene);
+    EnsureEnvironmentUploaded(snapshot.environmentData ? snapshot.environmentData : FallbackEnvironment());
+    EnsureMeshesUploaded(*snapshot.meshes);
+    EnsureMaterialTexturesUploaded(*snapshot.materials);
+    UpdateCameraUniforms(snapshot);
 
     int framebufferWidth = 0;
     int framebufferHeight = 0;
     glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth == 0 || framebufferHeight == 0) return;
+    if (framebufferWidth != m_hdrWidth || framebufferHeight != m_hdrHeight)
+        ResizeHdrTarget(framebufferWidth, framebufferHeight);
 
+    // Render the opaque scene from the directional light into a fixed-size depth map.
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFramebuffer);
+    m_gl.glViewport(0, 0, 1024, 1024);
+    m_gl.glClear(GL_DEPTH_BUFFER_BIT);
+    m_gl.glUseProgram(m_shadowProgram);
+    m_gl.glUniformMatrix4fv(m_shadowLightViewProjectionLocation, 1, GL_FALSE,
+        glm::value_ptr(snapshot.lightViewProjection));
+    for (const DrawItem& item : snapshot.drawItems) {
+        if (item.unlit) continue;
+        const GlMesh& mesh = m_meshes.at(item.meshIndex);
+        m_gl.glUniformMatrix4fv(m_shadowModelLocation, 1, GL_FALSE,
+            glm::value_ptr(item.worldTransform));
+        m_gl.glBindVertexArray(mesh.vertexArray);
+        m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT, nullptr);
+    }
+    m_gl.glBindVertexArray(0);
+    m_gl.glUseProgram(0);
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
     m_gl.glViewport(0, 0, framebufferWidth, framebufferHeight);
+    m_gl.glClearColor(0.05f, 0.06f, 0.09f, 0.0f);
     m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // --- scene --------------------------------------------------------------
     m_gl.glUseProgram(m_shaderProgram);
+    for (int i = 0; i < 4; ++i) {
+        m_gl.glActiveTexture(GL_TEXTURE0 + 2 + i);
+        m_gl.glBindTexture(i == 3 ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP, m_environmentTextures[i]);
+    }
     m_gl.glActiveTexture(GL_TEXTURE0);
-    m_gl.glBindTexture(GL_TEXTURE_2D, m_texture);
+    m_gl.glActiveTexture(GL_TEXTURE0 + 1);
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_shadowDepthTexture);
+    m_gl.glActiveTexture(GL_TEXTURE0);
     m_gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_cameraUniformBuffer);
 
-    for (const DrawItem& item : scene.drawItems) {
+    for (const DrawItem& item : snapshot.drawItems) {
         const GlMesh& mesh = m_meshes[item.meshIndex];
 
         // 每次绘制一个统一变量，Vulkan push constant。
         // 两者都是“小型数据，每次绘制都会变化且不需要描述符”；只是写法不同。
         m_gl.glUniformMatrix4fv(m_modelLocation, 1, GL_FALSE,
             glm::value_ptr(item.worldTransform));
+        m_gl.glUniform3fv(m_tintLocation, 1, glm::value_ptr(item.tint));
+        const glm::vec3 material(item.metallicFactor, item.roughnessFactor,
+            item.unlit ? 1.0f : 0.0f);
+        m_gl.glUniform3fv(m_metallicLocation, 1, glm::value_ptr(material));
+        m_gl.glUniform3fv(m_emissive, 1, glm::value_ptr(item.emissive));
+
+        const GLuint texture = item.textureIndex == 0xFFFFFFFFu
+            ? m_texture : m_materialTextures.at(item.textureIndex).handle;
+        m_gl.glBindTexture(GL_TEXTURE_2D, texture);
 
         m_gl.glBindVertexArray(mesh.vertexArray);
         m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount),
@@ -168,11 +239,28 @@ void OpenGLRenderer::DrawFrame(const Scene& scene)
     m_gl.glBindVertexArray(0);
     m_gl.glUseProgram(0);
 
+    // Tone-map the linear RGBA16F scene target into the sRGB window, then draw UI on top.
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_gl.glDrawBuffer(GL_BACK);
+    m_gl.glReadBuffer(GL_BACK);
+    m_gl.glViewport(0, 0, framebufferWidth, framebufferHeight);
+    m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    m_gl.glDisable(GL_DEPTH_TEST);
+    m_gl.glUseProgram(m_tonemapProgram);
+    m_gl.glUniform1i(m_hdrColorLocation, 0);
+    m_gl.glActiveTexture(GL_TEXTURE0);
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrColorTexture);
+    m_gl.glBindVertexArray(m_fullscreenVertexArray);
+    m_gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+    m_gl.glBindVertexArray(0);
+    m_gl.glUseProgram(0);
+    m_gl.glEnable(GL_DEPTH_TEST);
+
     // --- overlay ------------------------------------------------------------
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
-    BuildImGuiFrame();
+    BuildImGuiFrame(drawEditorUi);
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -193,7 +281,20 @@ void OpenGLRenderer::Cleanup()
     ShutdownImGui();
 
     DestroyTexture();
+    DestroyMaterialTextures();
+    m_gl.glDeleteTextures(4, m_environmentTextures.data());
+    m_uploadedEnvironment.reset();
     DestroyMeshes();
+    DestroyShadowResources();
+    DestroyHdrTarget();
+    if (m_tonemapProgram != 0) {
+        m_gl.glDeleteProgram(m_tonemapProgram);
+        m_tonemapProgram = 0;
+    }
+    if (m_fullscreenVertexArray != 0) {
+        m_gl.glDeleteVertexArrays(1, &m_fullscreenVertexArray);
+        m_fullscreenVertexArray = 0;
+    }
 
     if (m_cameraUniformBuffer != 0) {
         m_gl.glDeleteBuffers(1, &m_cameraUniformBuffer);
@@ -212,8 +313,60 @@ void OpenGLRenderer::Cleanup()
 // Meshes
 // ---------------------------------------------------------------------------
 
+GLuint OpenGLRenderer::UploadFloatTexture(const FloatTexture& texture)
+{
+    GLuint handle = 0;
+    m_gl.glGenTextures(1, &handle);
+    const GLenum target = texture.layers == 6 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+    m_gl.glActiveTexture(GL_TEXTURE0 + 2);
+    m_gl.glBindTexture(target, handle);
+    for (uint32_t mip = 0; mip < texture.mips.size(); ++mip) {
+        const auto& level = texture.mips[mip];
+        const size_t facePixels = size_t(level.width) * level.height * 4;
+        for (uint32_t face = 0; face < texture.layers; ++face)
+            m_gl.glTexImage2D(texture.layers == 6 ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + face : GL_TEXTURE_2D,
+                mip, GL_RGBA32F, level.width, level.height, 0, GL_RGBA, GL_FLOAT,
+                level.pixels.data() + face * facePixels);
+    }
+    // 输出 mip 已经按 GGX 计算，绝不能再调用 glGenerateMipmap 覆盖。
+    m_gl.glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, GLint(texture.mips.size() - 1));
+    m_gl.glTexParameteri(target, GL_TEXTURE_MIN_FILTER, texture.mips.size() > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    m_gl.glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    m_gl.glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    m_gl.glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (texture.layers == 6) m_gl.glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    if (m_gl.glGetError() != GL_NO_ERROR) {
+        m_gl.glDeleteTextures(1, &handle);
+        throw std::runtime_error("failed to upload floating-point environment texture");
+    }
+    return handle;
+}
+
+void OpenGLRenderer::EnsureEnvironmentUploaded(std::shared_ptr<const EnvironmentData> data)
+{
+    if (m_uploadedEnvironment == data) return;
+    std::array<GLuint, 4> uploaded{};
+    try {
+        uploaded[0] = UploadFloatTexture(data->radiance);
+        uploaded[1] = UploadFloatTexture(data->irradiance);
+        uploaded[2] = UploadFloatTexture(data->prefiltered);
+        uploaded[3] = UploadFloatTexture(*data->brdfLut);
+    } catch (...) { m_gl.glDeleteTextures(4, uploaded.data()); throw; }
+    WaitIdle();
+    m_gl.glDeleteTextures(4, m_environmentTextures.data());
+    m_environmentTextures = uploaded;
+    m_uploadedEnvironment = std::move(data);
+    m_gl.glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    m_gl.glActiveTexture(GL_TEXTURE0);
+}
+
 void OpenGLRenderer::EnsureMeshesUploaded(const MeshLibrary& meshes)
 {
+    if (m_meshLibraryIdentity != meshes.Identity() || m_meshLibraryRevision != meshes.Revision()) {
+        DestroyMeshes();
+        m_meshLibraryIdentity = meshes.Identity();
+        m_meshLibraryRevision = meshes.Revision();
+    }
     const uint32_t target = meshes.Count();
     if (m_meshes.size() >= target) {
         return;
@@ -225,6 +378,42 @@ void OpenGLRenderer::EnsureMeshesUploaded(const MeshLibrary& meshes)
     for (uint32_t index = firstNew; index < target; ++index) {
         UploadMesh(meshes.Get(index), index);
     }
+}
+
+void OpenGLRenderer::EnsureMaterialTexturesUploaded(const MaterialLibrary& materials)
+{
+    if (m_materialLibraryIdentity == materials.Identity() &&
+        m_materialLibraryRevision == materials.Revision()) return;
+
+    DestroyMaterialTextures();
+    m_materialLibraryIdentity = materials.Identity();
+    m_materialLibraryRevision = materials.Revision();
+    m_materialTextures.resize(materials.TextureCount());
+    for (uint32_t index = 0; index < materials.TextureCount(); ++index) {
+        const Image& image = materials.GetTexture(index);
+        GlTexture& texture = m_materialTextures[index];
+        texture.width = image.width;
+        texture.height = image.height;
+        m_gl.glGenTextures(1, &texture.handle);
+        m_gl.glBindTexture(GL_TEXTURE_2D, texture.handle);
+        m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8,
+            static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, image.pixels.data());
+        m_gl.glGenerateMipmap(GL_TEXTURE_2D);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    }
+    m_gl.glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroyMaterialTextures()
+{
+    for (GlTexture& texture : m_materialTextures) {
+        if (texture.handle != 0) m_gl.glDeleteTextures(1, &texture.handle);
+    }
+    m_materialTextures.clear();
 }
 
 void OpenGLRenderer::UploadMesh(const MeshData& mesh, uint32_t meshIndex)
@@ -263,6 +452,10 @@ void OpenGLRenderer::UploadMesh(const MeshData& mesh, uint32_t meshIndex)
     m_gl.glEnableVertexAttribArray(2);
     m_gl.glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
         reinterpret_cast<const void*>(offsetof(Vertex, texCoord)));
+
+    m_gl.glEnableVertexAttribArray(3);
+    m_gl.glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride,
+        reinterpret_cast<const void*>(offsetof(Vertex, normal)));
 
     m_gl.glBindVertexArray(0);
 
@@ -350,20 +543,119 @@ void OpenGLRenderer::CreateShaderProgram()
 
     // 缓存一次：glGetUniformLocation 是字符串查找，每帧在绘制循环里调用它是有成本的，而且没有任何好处。
     m_modelLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uModel");
+    m_tintLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uTint");
+    m_metallicLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uMaterial");
     m_textureLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uTexture");
+    m_shadowSamplerLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uShadowMap");
+    m_emissive = m_gl.glGetUniformLocation(m_shaderProgram, "uEmissive");
 
-    if (m_modelLocation < 0 || m_textureLocation < 0) {
+    if (m_modelLocation < 0 || m_tintLocation < 0 || m_metallicLocation < 0 ||
+        m_textureLocation < 0 || m_shadowSamplerLocation < 0 || m_emissive < 0) {
         throw std::runtime_error(
             "the mesh shader program is missing uModel or uTexture. A linker removes "
             "uniforms the shader does not actually use, so this usually means the "
             "shader stopped referencing one.");
     }
 
-    // 一个采样器 uniform 拥有的是纹理单元，而不是纹理对象，这和 Vulkan 有区别 
+    // 一个采样器 uniform 拥有的是纹理单元，而不是纹理对象，这和 Vulkan 有区别
     // Vulkan 通过描述符集明确显示，而 OpenGL 则隐藏在一个整数后面。
     m_gl.glUseProgram(m_shaderProgram);
     m_gl.glUniform1i(m_textureLocation, 0);
+    m_gl.glUniform1i(m_shadowSamplerLocation, 1);
     m_gl.glUseProgram(0);
+}
+
+void OpenGLRenderer::CreateShadowResources()
+{
+    constexpr GLsizei kShadowSize = 1024;
+    m_gl.glGenTextures(1, &m_shadowDepthTexture);
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_shadowDepthTexture);
+    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowSize, kShadowSize,
+        0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    m_gl.glGenFramebuffers(1, &m_shadowFramebuffer);
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFramebuffer);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+        m_shadowDepthTexture, 0);
+    m_gl.glDrawBuffer(GL_NONE);
+    m_gl.glReadBuffer(GL_NONE);
+    if (m_gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        throw std::runtime_error("OpenGL directional shadow framebuffer is incomplete");
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    const GLuint vertex = CompileShader(GL_VERTEX_SHADER,
+        ReadTextFile(ShaderSourcePath("gl_shadow.vert")), ShaderSourcePath("gl_shadow.vert"));
+    const GLuint fragment = CompileShader(GL_FRAGMENT_SHADER,
+        ReadTextFile(ShaderSourcePath("gl_shadow.frag")), ShaderSourcePath("gl_shadow.frag"));
+    m_shadowProgram = m_gl.glCreateProgram();
+    m_gl.glAttachShader(m_shadowProgram, vertex);
+    m_gl.glAttachShader(m_shadowProgram, fragment);
+    m_gl.glLinkProgram(m_shadowProgram);
+    m_gl.glDeleteShader(vertex);
+    m_gl.glDeleteShader(fragment);
+    GLint linked = GL_FALSE;
+    m_gl.glGetProgramiv(m_shadowProgram, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) throw std::runtime_error("failed to link directional shadow shader");
+    m_shadowModelLocation = m_gl.glGetUniformLocation(m_shadowProgram, "uModel");
+    m_shadowLightViewProjectionLocation = m_gl.glGetUniformLocation(m_shadowProgram, "uLightViewProjection");
+    if (m_shadowModelLocation < 0 || m_shadowLightViewProjectionLocation < 0)
+        throw std::runtime_error("directional shadow shader is missing required uniforms");
+}
+
+void OpenGLRenderer::DestroyShadowResources()
+{
+    if (m_shadowProgram != 0) m_gl.glDeleteProgram(m_shadowProgram);
+    if (m_shadowFramebuffer != 0) m_gl.glDeleteFramebuffers(1, &m_shadowFramebuffer);
+    if (m_shadowDepthTexture != 0) m_gl.glDeleteTextures(1, &m_shadowDepthTexture);
+    m_shadowProgram = m_shadowFramebuffer = m_shadowDepthTexture = 0;
+}
+
+void OpenGLRenderer::ResizeHdrTarget(int width, int height)
+{
+    if (width <= 0 || height <= 0) return;
+    if (m_hdrFramebuffer == 0) m_gl.glGenFramebuffers(1, &m_hdrFramebuffer);
+    if (m_hdrColorTexture == 0) m_gl.glGenTextures(1, &m_hdrColorTexture);
+    if (m_hdrDepthTexture == 0) m_gl.glGenTextures(1, &m_hdrDepthTexture);
+
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrColorTexture);
+    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+        GL_RGBA, GL_HALF_FLOAT, nullptr);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrDepthTexture);
+    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+        GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, m_hdrColorTexture, 0);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+        GL_TEXTURE_2D, m_hdrDepthTexture, 0);
+    if (m_gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        throw std::runtime_error("OpenGL RGBA16F HDR framebuffer is incomplete");
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_hdrWidth = width;
+    m_hdrHeight = height;
+}
+
+void OpenGLRenderer::DestroyHdrTarget()
+{
+    if (m_hdrFramebuffer != 0) m_gl.glDeleteFramebuffers(1, &m_hdrFramebuffer);
+    if (m_hdrColorTexture != 0) m_gl.glDeleteTextures(1, &m_hdrColorTexture);
+    if (m_hdrDepthTexture != 0) m_gl.glDeleteTextures(1, &m_hdrDepthTexture);
+    m_hdrFramebuffer = m_hdrColorTexture = m_hdrDepthTexture = 0;
+    m_hdrWidth = m_hdrHeight = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,19 +743,30 @@ void OpenGLRenderer::ReloadTexture()
 // Camera
 // ---------------------------------------------------------------------------
 
-void OpenGLRenderer::UpdateCameraUniforms(const Scene& scene)
+void OpenGLRenderer::UpdateCameraUniforms(const RenderSnapshot& snapshot)
 {
     int framebufferWidth = 0;
     int framebufferHeight = 0;
     glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
 
     GlCameraUniforms uniforms;
-    uniforms.view = scene.camera.ViewMatrix();
+    uniforms.view = snapshot.camera.ViewMatrix();
 
     const float aspect = framebufferHeight > 0
         ? static_cast<float>(framebufferWidth) / static_cast<float>(framebufferHeight)
         : 1.0f;
-    uniforms.proj = scene.camera.ProjectionMatrix(aspect);
+    uniforms.proj = snapshot.camera.ProjectionMatrix(aspect);
+    uniforms.cameraPosition = glm::vec4(snapshot.camera.position, 1.0f);
+    uniforms.lightDirection = glm::vec4(snapshot.lightDirection, 0.0f);
+    uniforms.lightColor = glm::vec4(snapshot.lightColor, 1.0f);
+    uniforms.lightViewProjection = snapshot.lightViewProjection;
+    uniforms.inverseViewProjection = glm::inverse(uniforms.proj * uniforms.view);
+    uniforms.environment = glm::vec4(snapshot.environment.intensity,
+        snapshot.environmentData && snapshot.environment.enabled ? 1.0f : 0.0f,
+        snapshot.environmentData && snapshot.environment.background ? 1.0f : 0.0f,
+        float(m_uploadedEnvironment->prefiltered.mips.size() - 1));
+    uniforms.lightingTerms = glm::vec4(snapshot.lightingTerms, 0.0f);
+    uniforms.framebufferSize = glm::vec4(framebufferWidth, framebufferHeight, 0, 0);
 
     // 注意：这里没有Y轴翻转。
 
@@ -505,12 +808,12 @@ void OpenGLRenderer::ShutdownImGui()
     ImGui::DestroyContext();
 }
 
-void OpenGLRenderer::BuildImGuiFrame()
+void OpenGLRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
 {
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_FirstUseEver);
 
-    ImGui::Begin("Mini Engine - OpenGL backend");
+    ImGui::Begin("Renderer Diagnostics - OpenGL");
 
     const ImGuiIO& io = ImGui::GetIO();
     if (io.Framerate > 0.0f) {
@@ -532,4 +835,6 @@ void OpenGLRenderer::BuildImGuiFrame()
         "interface. main.cpp does not know which backend it got.");
 
     ImGui::End();
+
+    drawEditorUi();
 }

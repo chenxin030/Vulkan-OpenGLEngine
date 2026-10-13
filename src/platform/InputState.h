@@ -19,4 +19,26 @@ struct InputState
 
     // // 冲刺键
     bool sprint = false;
+
+    bool quitRequested = false;
 };
+
+struct EditorInputCapture
+{
+    bool keyboard = false;
+    bool mouse = false;
+};
+
+inline void FilterCapturedEditorInput(InputState& input, const EditorInputCapture& capture)
+{
+    if (capture.keyboard) {
+        input.moveAxis = glm::vec3(0.0f);
+        input.sprint = false;
+        input.quitRequested = false;
+    }
+
+    if (capture.mouse) {
+        input.lookActive = false;
+        input.lookDelta = glm::vec2(0.0f);
+    }
+}

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstddef>
 
@@ -52,8 +52,13 @@ typedef std::ptrdiff_t GLintptr;
 
 #define GL_DEPTH_TEST 0x0B71
 #define GL_CULL_FACE 0x0B44
-#define GL_BACK 0x0405
 #define GL_FRAMEBUFFER_SRGB 0x8DB9
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_DEPTH_ATTACHMENT 0x8D00
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_NONE 0
+#define GL_BACK 0x0405
 
 #define GL_VERSION 0x1F02
 #define GL_RENDERER 0x1F01
@@ -65,6 +70,7 @@ typedef std::ptrdiff_t GLintptr;
 
 #define GL_FLOAT 0x1406
 #define GL_UNSIGNED_BYTE 0x1401
+#define GL_UNSIGNED_INT 0x1405
 #define GL_UNSIGNED_SHORT 0x1403
 #define GL_TRIANGLES 0x0004
 
@@ -74,9 +80,19 @@ typedef std::ptrdiff_t GLintptr;
 #define GL_LINK_STATUS 0x8B82
 #define GL_INFO_LOG_LENGTH 0x8B84
 
+#define GL_TEXTURE_CUBE_MAP 0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#define GL_TEXTURE_CUBE_MAP_SEAMLESS 0x884F
+#define GL_TEXTURE_WRAP_R 0x8072
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#define GL_RGBA32F 0x8814
 #define GL_TEXTURE_2D 0x0DE1
 #define GL_TEXTURE0 0x84C0
 #define GL_RGBA 0x1908
+#define GL_RGBA16F 0x881A
+#define GL_HALF_FLOAT 0x140B
+#define GL_DEPTH_COMPONENT 0x1902
+#define GL_DEPTH_COMPONENT24 0x81A6
 // sRGB，而不是普通的 RGBA8。采样器在读取时会转换为线性，
 // GL_FRAMEBUFFER_SRGB 在写入时再转换回来，这和 Vulkan 后端从 VK_FORMAT_R8G8B8A8_SRGB 加上 sRGB 交换链得到的一对转换是一样的。
 // 如果其中一半做错了，第二个后端看起来可能“差不多对”，但显然会显得洗白或灰暗。
@@ -87,8 +103,10 @@ typedef std::ptrdiff_t GLintptr;
 #define GL_TEXTURE_WRAP_S 0x2802
 #define GL_TEXTURE_WRAP_T 0x2803
 #define GL_LINEAR 0x2601
+#define GL_NEAREST 0x2600
 #define GL_LINEAR_MIPMAP_LINEAR 0x2703
 #define GL_REPEAT 0x2901
+#define GL_CLAMP_TO_EDGE 0x812F
 
 // --- entry points -----------------------------------------------------------
 //
@@ -116,6 +134,7 @@ typedef std::ptrdiff_t GLintptr;
     X(glEnableVertexAttribArray, void, (GLuint))                     \
     X(glVertexAttribPointer, void, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)) \
     X(glDrawElements, void, (GLenum, GLsizei, GLenum, const void*))  \
+    X(glDrawArrays, void, (GLenum, GLint, GLsizei))                  \
     X(glCreateShader, GLuint, (GLenum))                              \
     X(glShaderSource, void, (GLuint, GLsizei, const GLchar* const*, const GLint*)) \
     X(glCompileShader, void, (GLuint))                               \
@@ -131,6 +150,7 @@ typedef std::ptrdiff_t GLintptr;
     X(glDeleteProgram, void, (GLuint))                               \
     X(glGetUniformLocation, GLint, (GLuint, const GLchar*))          \
     X(glUniformMatrix4fv, void, (GLint, GLsizei, GLboolean, const GLfloat*)) \
+    X(glUniform3fv, void, (GLint, GLsizei, const GLfloat*))             \
     X(glUniform1i, void, (GLint, GLint))                             \
     X(glGenTextures, void, (GLsizei, GLuint*))                       \
     X(glBindTexture, void, (GLenum, GLuint))                         \
@@ -138,7 +158,14 @@ typedef std::ptrdiff_t GLintptr;
     X(glTexParameteri, void, (GLenum, GLenum, GLint))                \
     X(glGenerateMipmap, void, (GLenum))                              \
     X(glActiveTexture, void, (GLenum))                               \
-    X(glDeleteTextures, void, (GLsizei, const GLuint*))
+    X(glDeleteTextures, void, (GLsizei, const GLuint*))                 \
+    X(glGenFramebuffers, void, (GLsizei, GLuint*))                      \
+    X(glBindFramebuffer, void, (GLenum, GLuint))                        \
+    X(glFramebufferTexture2D, void, (GLenum, GLenum, GLenum, GLuint, GLint)) \
+    X(glCheckFramebufferStatus, GLenum, (GLenum))                       \
+    X(glDeleteFramebuffers, void, (GLsizei, const GLuint*))              \
+    X(glDrawBuffer, void, (GLenum))                                     \
+    X(glReadBuffer, void, (GLenum))
 
 struct GlFunctions
 {

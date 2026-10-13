@@ -1,10 +1,12 @@
-﻿#pragma once
+#pragma once
 
 #include "openglFunctions.h"
 #include "platform/FileWatch.h"
 #include "rhi/Renderer.h"
-#include "scene/Image.h"
+#include "scene/MaterialLibrary.h"
 #include "scene/MeshLibrary.h"
+#include "scene/Environment.h"
+#include <array>
 
 #include <cstdint>
 #include <string>
@@ -30,7 +32,8 @@ public:
     // Renderer
     void ConfigureWindowHints() const override;
     void Init(GLFWwindow* window) override;
-    void DrawFrame(const Scene& scene) override;
+    void DrawFrame(const RenderSnapshot& snapshot,
+        const std::function<void()>& drawEditorUi) override;
     void WaitIdle() override;
     void Cleanup() override;
 
@@ -45,23 +48,41 @@ private:
         GLuint indexCount = 0;
     };
 
+    struct GlTexture
+    {
+        GLuint handle = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
+
     void InitImGui();
     void ShutdownImGui();
-    void BuildImGuiFrame();
+    void BuildImGuiFrame(const std::function<void()>& drawEditorUi);
 
     void EnsureMeshesUploaded(const MeshLibrary& meshes);
+    void EnsureMaterialTexturesUploaded(const MaterialLibrary& materials);
+    void DestroyMaterialTextures();
     void UploadMesh(const MeshData& mesh, uint32_t meshIndex);
     void DestroyMeshes();
 
     void CreateShaderProgram();
     GLuint CompileShader(GLenum stage, const std::string& source, const std::string& path) const;
 
+    void EnsureEnvironmentUploaded(std::shared_ptr<const EnvironmentData> data);
+    GLuint UploadFloatTexture(const FloatTexture& texture);
+    std::shared_ptr<const EnvironmentData> m_uploadedEnvironment;
+    std::array<GLuint, 4> m_environmentTextures{};
+
     void CreateTexture();
     void UploadTexture(const Image& image);
     void DestroyTexture();
     void ReloadTexture();
 
-    void UpdateCameraUniforms(const Scene& scene);
+    void UpdateCameraUniforms(const RenderSnapshot& snapshot);
+    void CreateShadowResources();
+    void DestroyShadowResources();
+    void ResizeHdrTarget(int width, int height);
+    void DestroyHdrTarget();
 
     GLFWwindow* m_window = nullptr;
 
@@ -72,12 +93,35 @@ private:
     bool m_imguiInitialized = false;
 
     std::vector<GlMesh> m_meshes;
+    std::vector<GlTexture> m_materialTextures;
+    uint64_t m_meshLibraryIdentity = 0;
+    uint64_t m_meshLibraryRevision = UINT64_MAX;
+    uint64_t m_materialLibraryIdentity = 0;
+    uint64_t m_materialLibraryRevision = UINT64_MAX;
 
     GLuint m_shaderProgram = 0;
     GLint m_modelLocation = -1;
+    GLint m_tintLocation = -1;
+    GLint m_metallicLocation = -1;
     GLint m_textureLocation = -1;
+    GLint m_emissive = -1;
 
     GLuint m_cameraUniformBuffer = 0;
+    GLuint m_shadowFramebuffer = 0;
+    GLuint m_shadowDepthTexture = 0;
+    GLuint m_shadowProgram = 0;
+    GLint m_shadowModelLocation = -1;
+    GLint m_shadowLightViewProjectionLocation = -1;
+    GLint m_shadowSamplerLocation = -1;
+
+    GLuint m_hdrFramebuffer = 0;
+    GLuint m_hdrColorTexture = 0;
+    GLuint m_hdrDepthTexture = 0;
+    int m_hdrWidth = 0;
+    int m_hdrHeight = 0;
+    GLuint m_tonemapProgram = 0;
+    GLint m_hdrColorLocation = -1;
+    GLuint m_fullscreenVertexArray = 0;
 
     GLuint m_texture = 0;
     uint32_t m_textureWidth = 0;

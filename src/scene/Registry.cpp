@@ -1,5 +1,37 @@
 ﻿#include "scene/Registry.h"
 
+#include <utility>
+
+Registry::Registry(const Registry& other)
+    : m_generations(other.m_generations),
+      m_alive(other.m_alive),
+      m_freeIndices(other.m_freeIndices),
+      m_liveCount(other.m_liveCount)
+{
+    for (const auto& [type, storage] : other.m_storages) {
+        m_storages.emplace(type, storage->Clone());
+    }
+}
+
+Registry& Registry::operator=(const Registry& other)
+{
+    if (this != &other) {
+        Registry copy(other);
+        Swap(copy);
+    }
+    return *this;
+}
+
+void Registry::Swap(Registry& other) noexcept
+{
+    using std::swap;
+    swap(m_generations, other.m_generations);
+    swap(m_alive, other.m_alive);
+    swap(m_freeIndices, other.m_freeIndices);
+    swap(m_liveCount, other.m_liveCount);
+    swap(m_storages, other.m_storages);
+}
+
 Entity Registry::Create()
 {
     uint32_t index = 0;

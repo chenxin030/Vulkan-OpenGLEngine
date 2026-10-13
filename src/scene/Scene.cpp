@@ -1,10 +1,12 @@
-#include "Scene.h"
+﻿#include "Scene.h"
 
 #include "scene/Components.h"
-#include "scene/Systems.h"
 #include "MeshLibrary.h"
 
 #include <cmath>
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
 #include <glm/ext/matrix_transform.hpp>
 
 namespace {
@@ -13,27 +15,37 @@ constexpr float kPi = 3.14159265358979323846f;
 
 }  // namespace
 
-void Scene::Update(float deltaSeconds)
+uint32_t Scene::FindModelAssetIndex(const std::string& id) const
 {
-    elapsed += deltaSeconds;
+    for (uint32_t i = 0; i < modelAssets.size(); ++i) if (modelAssets[i].id == id) return i;
+    throw std::runtime_error("unknown model asset ID: " + id);
+}
 
-    // 顺序在这里写死，而且重要：
-    //   SpinSystem      推进 angle（下一行要读它）
-    //   TransformSystem pass 1 把 world 重置成 local，pass 2 右乘自转
-    //   BobSystem       在 world 上左乘世界空间的竖直位移 —— 必须晚于 pass 1 的重置
-    // 显式几行（而不是一张系统注册表）也是它能被 grep 到的原因。
-    SpinSystem(registry, deltaSeconds);
-    TransformSystem(registry);
-    BobSystem(registry, elapsed);
+std::string Scene::AllocateModelAssetId()
+{
+    for (;;) {
+        if (m_nextModelAssetId == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("Scene is out of model asset IDs");
+        std::string id = "model-" + std::to_string(m_nextModelAssetId++);
+        const bool used = std::any_of(modelAssets.begin(), modelAssets.end(),
+            [&](const ModelAsset& asset) { return asset.id == id; });
+        if (!used) return id;
+    }
+}
 
-    // 一般来说实体动了就只改列表里对应那一项更快，但要求每一条修改世界的路径都记得同步列表
-    // 现在规模小，几次到几十次矩阵拷贝就可以防止出问题
-    drawItems.clear();
-
-    registry.ForEach<Transform, MeshRenderer>(
-        [this](Entity, const Transform& transform, const MeshRenderer& mesh) {
-        drawItems.push_back(DrawItem{ transform.world, mesh.meshIndex });
-    });
+void Scene::DestroyEntitySubtree(Entity root)
+{
+    std::vector<Entity> subtree{ root };
+    for (size_t parentIndex = 0; parentIndex < subtree.size(); ++parentIndex) {
+        registry.ForEachEntity([&](Entity candidate) {
+            const Parent* parent = registry.TryGet<Parent>(candidate);
+            if (parent && parent->entity == subtree[parentIndex] &&
+                std::find(subtree.begin(), subtree.end(), candidate) == subtree.end()) {
+                subtree.push_back(candidate);
+            }
+        });
+    }
+    for (auto it = subtree.rbegin(); it != subtree.rend(); ++it) registry.Destroy(*it);
 }
 
 Scene BuildDemoScene()
@@ -121,5 +133,32 @@ Scene BuildDemoScene()
     scene.camera.yaw = -1.5707963f;   // looking along -Z, at the ring
     scene.camera.pitch = -0.25f;      // angled slightly down
 
+    return scene;
+}
+
+Scene BuildDemo2DScene()
+{
+    Scene scene;
+    scene.camera.projection = CameraProjection::Orthographic;
+    scene.camera.position = glm::vec3(0.0f, 0.0f, 10.0f);
+    scene.camera.yaw = -1.5707963f;
+    scene.camera.pitch = 0.0f;
+    scene.camera.orthographicHeight = 8.0f;
+
+    const glm::vec3 positions[] = {
+        {-2.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {2.0f, 0.0f, 0.0f}
+    };
+    const glm::vec3 colors[] = {
+        {0.95f, 0.30f, 0.25f}, {0.25f, 0.75f, 0.95f}, {0.40f, 0.90f, 0.35f}
+    };
+    for (int index = 0; index < 3; ++index) {
+        const Entity entity = scene.registry.Create();
+        Transform transform;
+        transform.local = glm::translate(glm::mat4(1.0f), positions[index]) *
+            glm::scale(glm::mat4(1.0f), glm::vec3(1.5f));
+        transform.world = transform.local;
+        scene.registry.Add<Transform>(entity, transform);
+        scene.registry.Add<SpriteRenderer>(entity, SpriteRenderer{ colors[index] });
+    }
     return scene;
 }

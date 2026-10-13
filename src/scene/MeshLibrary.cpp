@@ -3,10 +3,13 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 
 namespace {
+
+    std::atomic_uint64_t g_nextMeshLibraryIdentity{ 1 };
 
     constexpr float kHalfExtent = 0.5f;
     constexpr float kPi = 3.14159265358979323846f;
@@ -25,6 +28,27 @@ namespace {
         { 1.0f, 1.0f },
         { 0.0f, 1.0f },
     };
+
+    void GenerateNormals(MeshData& mesh)
+    {
+        std::vector<glm::vec3> sums(mesh.vertices.size(), glm::vec3(0.0f));
+        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            const uint16_t ia = mesh.indices[i];
+            const uint16_t ib = mesh.indices[i + 1];
+            const uint16_t ic = mesh.indices[i + 2];
+            const glm::vec3 edgeA = mesh.vertices[ib].position - mesh.vertices[ia].position;
+            const glm::vec3 edgeB = mesh.vertices[ic].position - mesh.vertices[ia].position;
+            const glm::vec3 normal = glm::cross(edgeA, edgeB);
+            if (glm::dot(normal, normal) <= 1e-12f) continue;
+            sums[ia] += normal;
+            sums[ib] += normal;
+            sums[ic] += normal;
+        }
+        for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+            if (glm::dot(sums[i], sums[i]) > 1e-12f)
+                mesh.vertices[i].normal = glm::normalize(sums[i]);
+        }
+    }
 
     // 立方体每个面的框架：u 和 v 的选择使得 u x v == 法线。
     struct FaceAxes
@@ -74,6 +98,7 @@ namespace {
             mesh.indices.push_back(static_cast<uint16_t>(base + 3));
         }
 
+        GenerateNormals(mesh);
         return mesh;
     }
 
@@ -160,6 +185,7 @@ namespace {
             mesh.indices.push_back(static_cast<uint16_t>(base + 3));
         }
 
+        GenerateNormals(mesh);
         return mesh;
     }
 
@@ -192,6 +218,21 @@ namespace {
 
         mesh.indices = { 0, 1, 2, 0, 2, 3 };
 
+        GenerateNormals(mesh);
+        return mesh;
+    }
+
+    MeshData BuildQuad()
+    {
+        MeshData mesh;
+        mesh.vertices = {
+            Vertex{ { -0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+            Vertex{ {  0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+            Vertex{ {  0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+            Vertex{ { -0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+        };
+        mesh.indices = { 0, 1, 2, 0, 2, 3 };
+        GenerateNormals(mesh);
         return mesh;
     }
 
@@ -290,18 +331,35 @@ namespace {
             }
         }
 
+        GenerateNormals(mesh);
         return mesh;
     }
 
 }  // namespace
 
 MeshLibrary::MeshLibrary()
+    : m_identity(g_nextMeshLibraryIdentity.fetch_add(1, std::memory_order_relaxed))
 {
     m_meshes.reserve(kBuiltinCount);
     m_meshes.push_back(BuildCube());
     m_meshes.push_back(BuildPyramid());
     m_meshes.push_back(BuildPlane());
     m_meshes.push_back(BuildCylinder());
+    m_meshes.push_back(BuildQuad());
+}
+
+uint32_t MeshLibrary::Append(MeshData mesh)
+{
+    if (!mesh.IsValid()) {
+        throw std::runtime_error("MeshLibrary::Append requires a mesh with vertices and indices");
+    }
+    if (m_meshes.size() >= UINT32_MAX) {
+        throw std::runtime_error("MeshLibrary is out of 32-bit indices");
+    }
+    const uint32_t index = static_cast<uint32_t>(m_meshes.size());
+    m_meshes.push_back(std::move(mesh));
+    ++m_revision;
+    return index;
 }
 
 const MeshData& MeshLibrary::Get(uint32_t index) const

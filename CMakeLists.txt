@@ -3,13 +3,15 @@ cmake_minimum_required(VERSION 3.24)
 project(Rebuild
     VERSION 0.1.0
     DESCRIPTION "From-scratch rebuild of the mini engine - D5/D6: swap chain, render pass, shaders"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
@@ -51,7 +53,19 @@ FetchContent_Declare(vma
     GIT_TAG        v3.1.0
     GIT_SHALLOW    TRUE)
 
-FetchContent_MakeAvailable(glfw imgui stb vma)
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE)
+
+FetchContent_Declare(tinygltf
+    GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+    GIT_TAG        v3.0.1
+    GIT_SHALLOW    TRUE)
+
+set(TINYGLTF3_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(TINYGLTF3_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glfw imgui stb vma nlohmann_json tinygltf)
 
 if(Vulkan_GLSLC_EXECUTABLE)
     set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
@@ -80,7 +94,11 @@ set(SHADER_NAMES
     cube_tex.vert
     cube_tex.frag
     mesh.vert
-    mesh.frag)
+    mesh.frag
+    tonemap.vert
+    tonemap.frag
+    shadow.vert
+    shadow.frag)
 
 set(SHADER_SPIRV_FILES)
 foreach(shader_name IN LISTS SHADER_NAMES)
@@ -106,6 +124,9 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
 
 add_executable(Rebuild
+    src/editor/Editor.cpp
+    src/editor/EditorGeometry.cpp
+    third_party/ImGuizmo/ImGuizmo.cpp
     # 第二个后端。它存在的意义是检验 Renderer 接口是不是真的与后端无关 ——
     # 所以它和第一个并列放在这里。
     src/rhi/opengl/openglRenderer.cpp
@@ -116,18 +137,42 @@ add_executable(Rebuild
     src/platform/FileWatch.cpp
     src/platform/GlfwInput.cpp
     src/scene/CameraController.cpp
-    src/scene/Image.cpp
     src/scene/MeshLibrary.cpp
+    src/scene/Environment.cpp
+    src/scene/MaterialLibrary.cpp
+    src/scene/ModelImporter.cpp
     src/scene/Registry.cpp
+    src/scene/RenderSnapshot.cpp
+    src/scene/SceneSerializer.cpp
+    "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.c"
     src/scene/Scene.cpp
+    src/scene/SceneUpdater.cpp
     src/scene/Systems.cpp
     ${IMGUI_SOURCES})
 
 if(BUILD_TESTING)
     add_executable(RebuildTests
         tests/RegistryTests.cpp
+        tests/Stage6Tests.cpp
+        tests/Stage7Tests.cpp
+        tests/Stage8Tests.cpp
+        src/editor/EditorGeometry.cpp
+        src/scene/MeshLibrary.cpp
+        src/scene/Environment.cpp
+        src/scene/MaterialLibrary.cpp
+        src/scene/ModelImporter.cpp
         src/scene/Registry.cpp)
+    target_sources(RebuildTests PRIVATE
+        src/scene/RenderSnapshot.cpp
+        src/scene/Scene.cpp
+        src/scene/SceneSerializer.cpp
+        "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.c"
+        src/scene/SceneUpdater.cpp
+        src/scene/Systems.cpp)
+    target_link_libraries(RebuildTests PRIVATE nlohmann_json::nlohmann_json)
     target_include_directories(RebuildTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_include_directories(RebuildTests PRIVATE "${tinygltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
+    target_compile_definitions(RebuildTests PRIVATE TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache")
     add_test(NAME Rebuild.Registry COMMAND RebuildTests)
 endif()
 
@@ -142,28 +187,36 @@ if(WIN32)
 endif()
 
 target_include_directories(Rebuild PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ImGuizmo"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${stb_SOURCE_DIR}"
     "${vma_SOURCE_DIR}/include"
     "${imgui_SOURCE_DIR}"
     "${imgui_SOURCE_DIR}/backends")
+target_include_directories(Rebuild PRIVATE "${tinygltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
 
 target_compile_definitions(Rebuild PRIVATE
     SHADER_DIR="${SHADER_OUTPUT_DIR}"
     # OpenGL 在**运行时**自己编译 GLSL，所以它要的是源码目录，而不是 .spv 目录。
     # 两个后端，两个答案：GLSL 什么时候变成机器码。
     SHADER_SOURCE_DIR="${SHADER_SOURCE_DIR}"
+    IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache"
     ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 target_link_libraries(Rebuild PRIVATE
     glfw
+    nlohmann_json::nlohmann_json
     OpenGL::GL
     Vulkan::Vulkan)
 
 if(MSVC)
     target_compile_options(Rebuild PRIVATE /utf-8)
+    if(BUILD_TESTING)
+        target_compile_options(RebuildTests PRIVATE /utf-8)
+    endif()
 
     target_compile_options(Rebuild PRIVATE /W4)
     set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")

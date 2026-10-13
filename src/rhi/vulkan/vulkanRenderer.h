@@ -4,16 +4,19 @@
 
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <array>
 #include <optional>
 #include <string>
+#include <cstddef>
 
 #include <glm/glm.hpp>
 
 #include "../Renderer.h"
 #include "scene/Vertex.h"
 #include "scene/MeshLibrary.h"
-#include "scene/Image.h"
+#include "scene/MaterialLibrary.h"
 #include "platform/FileWatch.h"
+#include "scene/Environment.h"
 
 #include <vk_mem_alloc.h>
 
@@ -30,12 +33,30 @@ enum class MemoryUse
 struct PushConstants
 {
 	glm::mat4 model;
+	glm::vec4 tint;
+	glm::vec4 material;
+	glm::vec3 emissive;
 };
+
+static_assert(offsetof(PushConstants, emissive) == 96,
+    "emissive must match the shader push constant offset");
+static_assert(sizeof(PushConstants) <= 128,
+    "mesh push constants must fit Vulkan's minimum supported size");
 
 struct UniformBufferObject {
 	glm::mat4 view;
 	glm::mat4 proj;
+	glm::vec4 cameraPosition;
+	glm::vec4 lightDirection;
+	glm::vec4 lightColor;
+	glm::mat4 lightViewProjection;
+	glm::mat4 inverseViewProjection;
+	glm::vec4 environment;
+	glm::vec4 lightingTerms;
+	glm::vec4 framebufferSize;
 };
+static_assert(offsetof(UniformBufferObject, environment) == 304 && sizeof(UniformBufferObject) == 352,
+    "environment camera UBO must match std140 shader offsets");
 
 struct QueueFamilyIndices {
 	std::optional<uint32_t> graphicsFamily;
@@ -66,7 +87,8 @@ public:
 	virtual void Init(GLFWwindow* window) override;
 	virtual void Cleanup() override;
 	virtual void WaitIdle() override;
-	virtual void DrawFrame(const Scene& scene) override;
+	virtual void DrawFrame(const RenderSnapshot& snapshot,
+		const std::function<void()>& drawEditorUi) override;
 	
 private:
 
@@ -86,8 +108,16 @@ private:
 	void CreateSwapChain();
 	void CreateImageViews();
 	void CreateDepthResources();
+	void CreateHdrResources();
+	void DestroyHdrResources();
 	void CreateRenderPass();
 	void CreateGraphicsPipeline();
+	void CreateToneMapPipeline();
+	void CreateShadowResources();
+	void DestroyShadowResources();
+	void CreateShadowRenderPass();
+	void CreateShadowPipeline();
+	void RecordShadowPass(VkCommandBuffer commandBuffer, const RenderSnapshot& snapshot);
 	void CreateFramebuffers();
 
 	void DestroySwapChainResources();
@@ -97,6 +127,7 @@ private:
 	// ----------------------------------------
 
 	void CreateDescriptorSetLayout();
+	void CreateToneMapDescriptorSet();
 	void CreateUniformBuffers();
 	void CreateDescriptorPool();
 	void CreateDescriptorSets();
@@ -106,6 +137,8 @@ private:
 	void GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage image,
 		int32_t width, int32_t height, uint32_t mipLevels) const;
 	void UploadTexture(const Image& image);
+	void EnsureMaterialTexturesUploaded(const MaterialLibrary& materials);
+	void DestroyMaterialTextures();
 	void DestroyTextureResources();
 	void ReloadTexture();
 	void CreateTextureSampler(uint32_t mipLevels);
@@ -114,14 +147,15 @@ private:
 	// 幂等的"确保已上传"：每帧调用，自己判断有没有新条目。
 	void EnsureMeshesUploaded(const MeshLibrary& meshes);
 	void UploadMesh(const MeshData& mesh, uint32_t meshIndex);
-	void UpdateUniformBuffer(uint32_t frameIndex, const Scene& scene);
-	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Scene& scene);
+	void UpdateUniformBuffer(uint32_t frameIndex, const RenderSnapshot& snapshot);
+	void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex,
+		const RenderSnapshot& snapshot);
 
 	// debug overlay
 	void InitImGui();
 	void InitImGuiVulkanBackend();
 	void ShutdownImGui();
-	void BuildImGuiFrame();
+	void BuildImGuiFrame(const std::function<void()>& drawEditorUi);
 
 	// helper
 	std::vector<const char*> GetRequiredExtensions();
@@ -147,10 +181,10 @@ private:
 	void UploadToDeviceLocal(const void* source, VkDeviceSize size,
 		VkBufferUsageFlags usage,
 		VkBuffer& buffer, VmaAllocation& allocation);
-	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation);
+	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation, uint32_t arrayLayers = 1, VkImageCreateFlags flags = 0);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
-		uint32_t mipLevels) const;
-	void TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount) const;
+		uint32_t mipLevels, bool cube = false) const;
+	void TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount, uint32_t layerCount = 1) const;
 	void CopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 	
 	void DestroyBuffer(VkBuffer& buffer, VmaAllocation& allocation);
@@ -189,10 +223,27 @@ private:
 	VkImage m_depthImage = VK_NULL_HANDLE;
 	VmaAllocation m_depthImageAllocation = nullptr;
 	VkImageView m_depthImageView = VK_NULL_HANDLE;
+	VkImage m_hdrImage = VK_NULL_HANDLE;
+	VmaAllocation m_hdrImageAllocation = nullptr;
+	VkImageView m_hdrImageView = VK_NULL_HANDLE;
+	VkFormat m_hdrFormat = VK_FORMAT_UNDEFINED;
 
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_toneMapDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSet m_toneMapDescriptorSet = VK_NULL_HANDLE;
+	VkPipelineLayout m_toneMapPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline m_toneMapPipeline = VK_NULL_HANDLE;
+	std::array<VkImage, kMaxFramesInFlight> m_shadowImages{};
+	std::array<VmaAllocation, kMaxFramesInFlight> m_shadowImageAllocations{};
+	std::array<VkImageView, kMaxFramesInFlight> m_shadowImageViews{};
+	VkSampler m_shadowSampler = VK_NULL_HANDLE;
+	std::array<VkFramebuffer, kMaxFramesInFlight> m_shadowFramebuffers{};
+	VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
+	VkRenderPass m_shadowRenderPass = VK_NULL_HANDLE;
+	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
 
 	// 场景资源。刻意与 swapchain 大小的那一组分开：这些都不依赖于尺寸，调整大小时不会影响它们。
 	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -214,6 +265,28 @@ private:
         uint32_t indexCount = 0;
 	};
 	std::vector<GpuMesh> m_meshes;
+	uint64_t m_meshLibraryIdentity = 0;
+	uint64_t m_meshLibraryRevision = UINT64_MAX;
+	struct GpuTexture {
+		VkImage image = VK_NULL_HANDLE;
+		VmaAllocation allocation = nullptr;
+		VkImageView view = VK_NULL_HANDLE;
+		VkSampler sampler = VK_NULL_HANDLE;
+	};
+    GpuTexture UploadFloatTexture(const FloatTexture& texture);
+    void CreateEnvironmentDescriptorSets();
+    void EnsureEnvironmentUploaded(std::shared_ptr<const EnvironmentData> data);
+    void WriteEnvironmentDescriptors();
+    void DestroyEnvironmentResources();
+    std::shared_ptr<const EnvironmentData> m_uploadedEnvironment;
+    std::array<GpuTexture, 4> m_environmentTextures{};
+    VkDescriptorSetLayout m_environmentSetLayout = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, kMaxFramesInFlight> m_environmentSets{};
+
+    std::vector<GpuTexture> m_materialTextures;
+	std::vector<std::vector<VkDescriptorSet>> m_materialDescriptorSets;
+	uint64_t m_materialLibraryIdentity = 0;
+	uint64_t m_materialLibraryRevision = UINT64_MAX;
 
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;

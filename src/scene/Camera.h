@@ -2,12 +2,19 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/ext/matrix_clip_space.hpp>
 
 #include <cmath>
 
 // 摄像机
 // 存储为位置和偏航/俯仰。
 // 后端中性，就像 scene/ 里的其他东西一样。它产生矩阵；它并不知道谁在使用这些矩阵。
+
+enum class CameraProjection
+{
+    Perspective,
+    Orthographic,
+};
 
 struct Camera
 {
@@ -20,6 +27,8 @@ struct Camera
     float fovDegrees = 50.0f;
     float nearPlane = 0.1f;
     float farPlane = 100.0f;
+    CameraProjection projection = CameraProjection::Perspective;
+    float orthographicHeight = 8.0f;
 
     // 相机观察方向的单位向量，包括俯仰角。
     glm::vec3 Forward() const
@@ -45,6 +54,13 @@ struct Camera
     // 用的时候把 `aspect` 传进去，相机不应该持有它 
     glm::mat4 ProjectionMatrix(float aspect) const
     {
-        return glm::perspective(glm::radians(fovDegrees), aspect, nearPlane, farPlane);
+        // 显式使用右手系、0～1 深度；应用和 CPU 测试不再依赖各自的 GLM 编译宏。
+        if (projection == CameraProjection::Orthographic) {
+            const float halfHeight = orthographicHeight * 0.5f;
+            const float halfWidth = halfHeight * aspect;
+            return glm::orthoRH_ZO(-halfWidth, halfWidth, -halfHeight, halfHeight,
+                nearPlane, farPlane);
+        }
+        return glm::perspectiveRH_ZO(glm::radians(fovDegrees), aspect, nearPlane, farPlane);
     }
 };

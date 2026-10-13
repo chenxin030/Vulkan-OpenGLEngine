@@ -8,7 +8,7 @@ GlfwInput::GlfwInput(GLFWwindow* window)
 {
 }
 
-InputState GlfwInput::Sample()
+InputState GlfwInput::Sample(const EditorInputCapture& capture)
 {
     InputState input;
 
@@ -34,6 +34,7 @@ InputState GlfwInput::Sample()
     }
 
     input.sprint = glfwGetKey(m_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+    input.quitRequested = glfwGetKey(m_window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
 
     // --- look ---------------------------------------------------------------
     // 按住右键才能移动视角
@@ -54,6 +55,13 @@ InputState GlfwInput::Sample()
     // 即使在视角不活动时，也要始终推进存储的位置。跳过这一步会导致摄像机在鼠标按下的瞬间，瞬移到鼠标移动过的距离。
     m_lastCursorPosition = cursorPosition;
     m_hasLastCursorPosition = true;
+
+    // UI 捕获来自上一帧；左键按下的第一帧也必须优先编辑，避免同时按 WASD
+    // 时相机先移动一帧，再被操纵轴捕获。左键释放后恢复原有相机输入规则。
+    EditorInputCapture effectiveCapture = capture;
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
+        effectiveCapture = { true, true };
+    FilterCapturedEditorInput(input, effectiveCapture);
 
     return input;
 }
