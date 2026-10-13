@@ -14,6 +14,8 @@ struct SurfaceMaterial
     float roughnessFactor = 0.8f;
     uint32_t baseColorTexture = 0xFFFFFFFFu;
     glm::vec3 emissive{ 0.0f };
+    uint32_t normalTexture = 0xFFFFFFFFu;
+    float normalScale = 1.0f;
 };
 
 struct Image
@@ -22,6 +24,8 @@ struct Image
     uint32_t height = 0;
 
     std::vector<uint8_t> pixels;
+    // 相同源图片用于颜色和法线时建立两个资源；不会互相覆盖采样解释。
+    bool srgb = true;
 
     bool IsValid() const
     {

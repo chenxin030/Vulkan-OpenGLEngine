@@ -59,6 +59,9 @@ typedef std::ptrdiff_t GLintptr;
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_NONE 0
 #define GL_BACK 0x0405
+#define GL_CW 0x0900
+#define GL_CCW 0x0901
+#define GL_RGBA8 0x8058
 
 #define GL_VERSION 0x1F02
 #define GL_RENDERER 0x1F01
@@ -117,6 +120,8 @@ typedef std::ptrdiff_t GLintptr;
     X(glClear, void, (GLbitfield))                                   \
     X(glEnable, void, (GLenum))                                      \
     X(glDisable, void, (GLenum))                                     \
+    X(glFrontFace, void, (GLenum))                                   \
+    X(glUniform4fv, void, (GLint, GLsizei, const GLfloat*))           \
     X(glCullFace, void, (GLenum))                                    \
     X(glViewport, void, (GLint, GLint, GLsizei, GLsizei))            \
     X(glGetString, const unsigned char*, (GLenum))                   \

@@ -36,10 +36,12 @@ struct PushConstants
 	glm::vec4 tint;
 	glm::vec4 material;
 	glm::vec3 emissive;
+    alignas(16) glm::vec4 normalInfo;
 };
 
 static_assert(offsetof(PushConstants, emissive) == 96,
     "emissive must match the shader push constant offset");
+static_assert(offsetof(PushConstants, normalInfo) == 112, "normalInfo must match shader offset");
 static_assert(sizeof(PushConstants) <= 128,
     "mesh push constants must fit Vulkan's minimum supported size");
 
@@ -231,6 +233,7 @@ private:
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
+    VkPipeline m_mirroredPipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_toneMapDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorSet m_toneMapDescriptorSet = VK_NULL_HANDLE;
 	VkPipelineLayout m_toneMapPipelineLayout = VK_NULL_HANDLE;
@@ -273,6 +276,9 @@ private:
 		VkImageView view = VK_NULL_HANDLE;
 		VkSampler sampler = VK_NULL_HANDLE;
 	};
+    // 复用 staging/mip 路径并恢复默认 checkerboard 的成员；只在资源替换时调用。
+    GpuTexture UploadMaterialTexture(const Image& image);
+    GpuTexture m_flatNormalTexture;
     GpuTexture UploadFloatTexture(const FloatTexture& texture);
     void CreateEnvironmentDescriptorSets();
     void EnsureEnvironmentUploaded(std::shared_ptr<const EnvironmentData> data);

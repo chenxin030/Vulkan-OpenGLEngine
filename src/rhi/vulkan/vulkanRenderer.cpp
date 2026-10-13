@@ -61,10 +61,10 @@ VkVertexInputBindingDescription VertexBindingDescription()
     return binding;
 }
 
-std::array<VkVertexInputAttributeDescription, 4> VertexAttributeDescriptions()
+std::array<VkVertexInputAttributeDescription, 5> VertexAttributeDescriptions()
 {
     // 故意逐字段分配：offsetof 返回 size_t，把它转换为花括号初始化器里的 uint32_t `offset` 成员算是窄化转换，有些编译器会直接拒绝。
-    std::array<VkVertexInputAttributeDescription, 4> attributes{};
+    std::array<VkVertexInputAttributeDescription, 5> attributes{};
 
     attributes[0].binding = 0;
     attributes[0].location = 0;
@@ -86,6 +86,10 @@ std::array<VkVertexInputAttributeDescription, 4> VertexAttributeDescriptions()
     attributes[3].format = VK_FORMAT_R32G32B32_SFLOAT;
     attributes[3].offset = static_cast<uint32_t>(offsetof(Vertex, normal));
 
+    attributes[4].binding = 0;
+    attributes[4].location = 4;
+    attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributes[4].offset = static_cast<uint32_t>(offsetof(Vertex, tangent));
     return attributes;
 }
 
@@ -117,6 +121,7 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateCommandBuffers();
 
     CreateTextureImage();
+    m_flatNormalTexture = UploadMaterialTexture(Image{1,1,{128,128,255,255},false});
 
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
@@ -159,6 +164,8 @@ void VulkanRenderer::Cleanup() {
 
     DestroyTextureResources();
     DestroyMaterialTextures();
+    DestroyImage(m_flatNormalTexture.image, m_flatNormalTexture.view,
+        m_flatNormalTexture.allocation, m_flatNormalTexture.sampler);
     DestroyEnvironmentResources();
 
     for (GpuMesh& mesh : m_meshes) {
@@ -664,8 +671,9 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
     shadowLayoutBinding.descriptorCount = 1;
     shadowLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
-        uboLayoutBinding, samplerLayoutBinding, shadowLayoutBinding };
+    auto normalLayoutBinding = samplerLayoutBinding; normalLayoutBinding.binding = 3;
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
+        uboLayoutBinding, samplerLayoutBinding, shadowLayoutBinding, normalLayoutBinding };
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -829,10 +837,10 @@ void VulkanRenderer::CreateDescriptorPool()
 {
     std::array<VkDescriptorPoolSize, 3> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    constexpr uint32_t maxMaterialTextures = 128;
+    constexpr uint32_t maxMaterialTextures = 256; // 每个材质一个 set，三种采样 binding。
     poolSizes[0].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight) * (2 + maxMaterialTextures);
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight) * (6 + 2 * maxMaterialTextures);
+    poolSizes[1].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight) * (7 + 3 * maxMaterialTextures);
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
     poolSizes[2].descriptorCount = 1;
 
@@ -912,7 +920,9 @@ void VulkanRenderer::CreateDescriptorSets()
         VkDescriptorImageInfo shadowInfo{ m_shadowSampler, m_shadowImageViews[i],
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
 
-        std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
+        VkDescriptorImageInfo normalInfo{m_flatNormalTexture.sampler, m_flatNormalTexture.view,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        std::array<VkWriteDescriptorSet, 4> descriptorWrites{};
 
         descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         descriptorWrites[0].dstSet = m_descriptorSets[i];
@@ -937,6 +947,9 @@ void VulkanRenderer::CreateDescriptorSets()
         descriptorWrites[2].descriptorCount = 1;
         descriptorWrites[2].pImageInfo = &shadowInfo;
 
+        descriptorWrites[3] = descriptorWrites[1];
+        descriptorWrites[3].dstBinding = 3;
+        descriptorWrites[3].pImageInfo = &normalInfo;
         vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
     }
 }
@@ -1505,7 +1518,7 @@ void VulkanRenderer::CreateGraphicsPipeline()
     const VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
     const VkVertexInputBindingDescription bindingDescription = VertexBindingDescription();
-    const std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions = VertexAttributeDescriptions();
+    const std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions = VertexAttributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1618,6 +1631,10 @@ void VulkanRenderer::CreateGraphicsPipeline()
         throw std::runtime_error("failed to create graphics pipeline!");
     }
 
+    // 静态绕序的第二条管线，不要求扩展动态状态；模型反射仍保持背面剔除。
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_mirroredPipeline) != VK_SUCCESS)
+        throw std::runtime_error("failed to create mirrored mesh pipeline");
     vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
     vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 }
@@ -1772,6 +1789,10 @@ void VulkanRenderer::DestroySwapChainResources()
 
 void VulkanRenderer::DestroyPipelineResources()
 {
+    if (m_mirroredPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_mirroredPipeline, nullptr);
+        m_mirroredPipeline = VK_NULL_HANDLE;
+    }
     if (m_graphicsPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_graphicsPipeline, nullptr);
         m_graphicsPipeline = VK_NULL_HANDLE;
@@ -1952,6 +1973,8 @@ void VulkanRenderer::GenerateMipmaps(VkCommandBuffer commandBuffer, VkImage imag
 
 void VulkanRenderer::UploadTexture(const Image& image)
 {
+    // 数据纹理不得经过 sRGB 解码；能力查询、image 和 view 使用相同格式。
+    const VkFormat textureFormat = image.srgb ? kTextureFormat : VK_FORMAT_R8G8B8A8_UNORM;
     m_textureWidth = image.width;
     m_textureHeight = image.height;
 
@@ -1962,7 +1985,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
     // 规范并不保证 mip 级别之间的线性 blit：一个格式能采样，却可能拒绝当 blit 的源或目标。
     // 先问，而不是在某些厂商驱动上发布一张全黑的贴图。
     VkFormatProperties formatProperties{};
-    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, kTextureFormat, &formatProperties);
+    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, textureFormat, &formatProperties);
 
     const VkFormatFeatureFlags requiredFeatures =
         VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
@@ -1976,7 +1999,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
 
     VkImageFormatProperties imageFormatProperties{};
     if (vkGetPhysicalDeviceImageFormatProperties(
-        m_physicalDevice, kTextureFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+        m_physicalDevice, textureFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT,
         0, &imageFormatProperties) != VK_SUCCESS ||
@@ -2002,7 +2025,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
     // 这一对弄错就是"贴图发白/发灰"的经典原因。
     //
     // TRANSFER_SRC 和 TRANSFER_DST 都要：mip 链是在同一张 image 内部逐层 blit 出来的。
-    CreateImage(image.width, image.height, m_textureMipLevels, kTextureFormat,
+    CreateImage(image.width, image.height, m_textureMipLevels, textureFormat,
         VK_IMAGE_TILING_OPTIMAL,
         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -2027,7 +2050,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
     DestroyBuffer(stagingBuffer, stagingAllocation);
 
     // view 要覆盖整条链，否则采样器只能读到 level 0，生成的 mip 对它不可见。
-    m_textureImageView = CreateImageView(m_textureImage, kTextureFormat,
+    m_textureImageView = CreateImageView(m_textureImage, textureFormat,
         VK_IMAGE_ASPECT_COLOR_BIT, m_textureMipLevels);
 
     CreateTextureSampler(m_textureMipLevels);
@@ -2042,60 +2065,66 @@ void VulkanRenderer::DestroyTextureResources()
     m_textureMipLevels = 1;
 }
 
+VulkanRenderer::GpuTexture VulkanRenderer::UploadMaterialTexture(const Image& image)
+{
+    // Save default checkerboard state; reuse the same staging, mip and sampler path.
+    GpuTexture saved{m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler};
+    const uint32_t width=m_textureWidth,height=m_textureHeight,levels=m_textureMipLevels;
+    auto restore=[&] {m_textureImage=saved.image; m_textureImageAllocation=saved.allocation;
+        m_textureImageView=saved.view; m_textureSampler=saved.sampler;
+        m_textureWidth=width; m_textureHeight=height; m_textureMipLevels=levels;};
+    m_textureImage=VK_NULL_HANDLE; m_textureImageAllocation=nullptr;
+    m_textureImageView=VK_NULL_HANDLE; m_textureSampler=VK_NULL_HANDLE;
+    try {
+        UploadTexture(image);
+        GpuTexture result{m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler};
+        restore(); return result;
+    } catch (...) { DestroyTextureResources(); restore(); throw; }
+}
+
 void VulkanRenderer::EnsureMaterialTexturesUploaded(const MaterialLibrary& materials)
 {
     if (m_materialLibraryIdentity == materials.Identity() &&
         m_materialLibraryRevision == materials.Revision()) return;
-    if (materials.TextureCount() > 128)
-        throw std::runtime_error("Vulkan material texture limit is 128 per scene");
+    if (materials.TextureCount() > 128 || materials.MaterialCount() > 256)
+        throw std::runtime_error("Vulkan scene limit is 128 images and 256 materials");
     WaitIdle();
     DestroyMaterialTextures();
-    m_materialLibraryIdentity = materials.Identity();
-    m_materialLibraryRevision = materials.Revision();
-    for (uint32_t index = 0; index < materials.TextureCount(); ++index) {
-        // Save default checkerboard state; reuse the same staging, mip and sampler path.
-        GpuTexture saved{ m_textureImage, m_textureImageAllocation, m_textureImageView, m_textureSampler };
-        const uint32_t width = m_textureWidth, height = m_textureHeight, levels = m_textureMipLevels;
-        m_textureImage = VK_NULL_HANDLE; m_textureImageAllocation = nullptr;
-        m_textureImageView = VK_NULL_HANDLE; m_textureSampler = VK_NULL_HANDLE;
-        UploadTexture(materials.GetTexture(index));
-        m_materialTextures.push_back({ m_textureImage, m_textureImageAllocation, m_textureImageView, m_textureSampler });
-        m_textureImage = saved.image; m_textureImageAllocation = saved.allocation;
-        m_textureImageView = saved.view; m_textureSampler = saved.sampler;
-        m_textureWidth = width; m_textureHeight = height; m_textureMipLevels = levels;
-
-        std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight, m_descriptorSetLayout);
+    for (uint32_t i=0;i<materials.TextureCount();++i)
+        m_materialTextures.push_back(UploadMaterialTexture(materials.GetTexture(i)));
+    // 每个材质绑定自己的颜色/法线组合，共用颜色图不再共用错误的法线 binding。
+    for (uint32_t i=0;i<materials.MaterialCount();++i) {
+        const auto& material=materials.GetMaterial(i);
+        std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight,m_descriptorSetLayout);
         std::vector<VkDescriptorSet> sets(kMaxFramesInFlight);
         VkDescriptorSetAllocateInfo ai{};
-        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        ai.descriptorPool = m_descriptorPool;
-        ai.descriptorSetCount = kMaxFramesInFlight;
-        ai.pSetLayouts = layouts.data();
-        if (vkAllocateDescriptorSets(m_device, &ai, sets.data()) != VK_SUCCESS)
-            throw std::runtime_error("failed to allocate material texture descriptor sets");
-        for (uint32_t frame = 0; frame < kMaxFramesInFlight; ++frame) {
-            VkDescriptorBufferInfo bi{ m_uniformBuffers[frame], 0, sizeof(UniformBufferObject) };
-            const GpuTexture& texture = m_materialTextures.back();
-            VkDescriptorImageInfo ii{ texture.sampler, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-            VkDescriptorImageInfo shadowInfo{ m_shadowSampler, m_shadowImageViews[frame],
-                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
-            std::array<VkWriteDescriptorSet, 3> writes{};
-            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[0].dstSet = sets[frame]; writes[0].dstBinding = 0;
-            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            writes[0].descriptorCount = 1; writes[0].pBufferInfo = &bi;
-            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[1].dstSet = sets[frame]; writes[1].dstBinding = 1;
-            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[1].descriptorCount = 1; writes[1].pImageInfo = &ii;
-            writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[2].dstSet = sets[frame]; writes[2].dstBinding = 2;
-            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[2].descriptorCount = 1; writes[2].pImageInfo = &shadowInfo;
-            vkUpdateDescriptorSets(m_device, 3, writes.data(), 0, nullptr);
+        ai.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; ai.descriptorPool=m_descriptorPool;
+        ai.descriptorSetCount=kMaxFramesInFlight; ai.pSetLayouts=layouts.data();
+        if (vkAllocateDescriptorSets(m_device,&ai,sets.data())!=VK_SUCCESS)
+            throw std::runtime_error("failed to allocate material descriptor sets");
+        m_materialDescriptorSets.push_back(sets);
+        for (uint32_t frame=0;frame<kMaxFramesInFlight;++frame) {
+            const auto& normal=material.normalTexture==UINT32_MAX ? m_flatNormalTexture : m_materialTextures.at(material.normalTexture);
+            VkDescriptorBufferInfo buffer{m_uniformBuffers[frame],0,sizeof(UniformBufferObject)};
+            VkDescriptorImageInfo base{m_textureSampler,m_textureImageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            if (material.baseColorTexture!=UINT32_MAX) {
+                const auto& t=m_materialTextures.at(material.baseColorTexture);
+                base={t.sampler,t.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            }
+            std::array<VkDescriptorImageInfo,3> images{{base,
+                {m_shadowSampler,m_shadowImageViews[frame],VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
+                {normal.sampler,normal.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}}};
+            std::array<VkWriteDescriptorSet,4> writes{};
+            for (uint32_t k=0;k<4;++k) {
+                writes[k].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[k].dstSet=sets[frame];
+                writes[k].dstBinding=k; writes[k].descriptorCount=1;
+                writes[k].descriptorType=k==0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                if (k==0) writes[k].pBufferInfo=&buffer; else writes[k].pImageInfo=&images[k-1];
+            }
+            vkUpdateDescriptorSets(m_device,4,writes.data(),0,nullptr);
         }
-        m_materialDescriptorSets.push_back(std::move(sets));
     }
+    m_materialLibraryIdentity=materials.Identity(); m_materialLibraryRevision=materials.Revision();
 }
 
 void VulkanRenderer::DestroyMaterialTextures()
@@ -2132,6 +2161,8 @@ void VulkanRenderer::ReloadTexture()
     // 描述符集仍然持有旧的图像视图：关于重新加载的其他一切都是纹理本地的，而这个不是。
     // 忘记它会在下一帧产生验证错误或崩溃，而不会像看起来陈旧的纹理那么温和
     WriteTextureDescriptors();
+    // 默认颜色图被无 baseColorTexture 的材质引用，下一帧重建它们的 binding。
+    m_materialLibraryRevision = UINT64_MAX;
 
     std::cout << "[hotreload] texture reloaded: " << m_textureWidth << "x" << m_textureHeight
         << ", " << m_textureMipLevels << " mip levels" << std::endl;
@@ -2282,12 +2313,9 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         assert(item.meshIndex < m_meshes.size() && "draw item references a mesh that was never uploaded");
 
         const GpuMesh& mesh = m_meshes[item.meshIndex];
-        VkDescriptorSet descriptorSet = m_descriptorSets[m_currentFrame];
-        if (item.textureIndex != 0xFFFFFFFFu) {
-            if (item.textureIndex >= m_materialDescriptorSets.size())
-                throw std::runtime_error("draw item references a missing material texture");
-            descriptorSet = m_materialDescriptorSets[item.textureIndex][m_currentFrame];
-        }
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            item.mirrored ? m_mirroredPipeline : m_graphicsPipeline);
+        VkDescriptorSet descriptorSet = m_materialDescriptorSets.at(item.materialIndex)[m_currentFrame];
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
             m_pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
@@ -2297,7 +2325,9 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
         const PushConstants push{ item.worldTransform, glm::vec4(item.tint, 1.0f),
-            glm::vec4(item.metallicFactor, item.roughnessFactor, item.unlit ? 1.0f : 0.0f, 0.0f) , item.emissive };
+            glm::vec4(item.metallicFactor, item.roughnessFactor, item.unlit ? 1.0f : 0.0f, item.normalScale), item.emissive,
+            glm::vec4(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
+                float(snapshot.normalDebug), 0.0f, 0.0f) };
         vkCmdPushConstants(commandBuffer, m_pipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(PushConstants), &push);

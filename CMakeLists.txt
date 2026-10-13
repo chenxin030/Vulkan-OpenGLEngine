@@ -137,6 +137,8 @@ add_executable(Rebuild
     src/platform/FileWatch.cpp
     src/platform/GlfwInput.cpp
     src/scene/CameraController.cpp
+    src/scene/TangentSpace.cpp
+    third_party/MikkTSpace/mikktspace.c
     src/scene/MeshLibrary.cpp
     src/scene/Environment.cpp
     src/scene/MaterialLibrary.cpp
@@ -156,7 +158,10 @@ if(BUILD_TESTING)
         tests/Stage6Tests.cpp
         tests/Stage7Tests.cpp
         tests/Stage8Tests.cpp
+        tests/Stage9Tests.cpp
         src/editor/EditorGeometry.cpp
+        src/scene/TangentSpace.cpp
+        third_party/MikkTSpace/mikktspace.c
         src/scene/MeshLibrary.cpp
         src/scene/Environment.cpp
         src/scene/MaterialLibrary.cpp
@@ -175,6 +180,63 @@ if(BUILD_TESTING)
     target_compile_definitions(RebuildTests PRIVATE TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache")
     add_test(NAME Rebuild.Registry COMMAND RebuildTests)
 endif()
+
+# Visual Studio 的虚拟文件夹按现有职责目录组织，.h 与 .cpp 放在同一组。
+# 这里只自动发现用于浏览的头文件/GLSL；参与编译的 C/C++ 仍由上面的显式列表决定。
+file(GLOB_RECURSE ENGINE_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp")
+file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS
+    "${SHADER_SOURCE_DIR}/*.vert"
+    "${SHADER_SOURCE_DIR}/*.frag")
+set_source_files_properties(${SHADER_SOURCES} PROPERTIES HEADER_FILE_ONLY TRUE)
+
+set(IMGUI_HEADERS
+    "${imgui_SOURCE_DIR}/imgui.h"
+    "${imgui_SOURCE_DIR}/imgui_internal.h"
+    "${imgui_SOURCE_DIR}/imconfig.h"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.h"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.h"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.h")
+set(MIKKTSPACE_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/third_party/MikkTSpace/mikktspace.h")
+set(TINYGLTF_HEADER "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.h")
+target_sources(Rebuild PRIVATE ${ENGINE_HEADERS} ${SHADER_SOURCES} ${IMGUI_HEADERS}
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.h"
+    ${MIKKTSPACE_HEADER} ${TINYGLTF_HEADER})
+
+# 测试项目展示它使用的场景/编辑器几何头文件，不混入渲染后端的头文件。
+if(BUILD_TESTING)
+    set(TEST_HEADERS ${ENGINE_HEADERS})
+    list(FILTER TEST_HEADERS INCLUDE REGEX "/src/(scene/|editor/EditorGeometry\\.h$)")
+    target_sources(RebuildTests PRIVATE ${TEST_HEADERS} ${MIKKTSPACE_HEADER} ${TINYGLTF_HEADER})
+endif()
+
+# 用法：调用 organize_project_sources(目标名)，从该目标的 SOURCES 生成 IDE 分组。
+# 不移动磁盘文件，不改变 include 路径或链接关系；新增头文件会触发 CMake 自动重新生成。
+function(organize_project_sources target)
+    get_target_property(target_source_files ${target} SOURCES)
+    foreach(source_file IN LISTS target_source_files)
+        get_filename_component(source_path "${source_file}" ABSOLUTE
+            BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        file(RELATIVE_PATH relative_source "${CMAKE_CURRENT_SOURCE_DIR}" "${source_path}")
+        if(relative_source MATCHES "^src/")
+            source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" PREFIX "Engine" FILES "${source_path}")
+        elseif(relative_source MATCHES "^shaders/")
+            source_group(TREE "${SHADER_SOURCE_DIR}" PREFIX "Shaders" FILES "${source_path}")
+        elseif(relative_source MATCHES "^tests/")
+            source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/tests" PREFIX "Tests" FILES "${source_path}")
+        elseif(relative_source MATCHES "^third_party/")
+            source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/third_party" PREFIX "ThirdParty" FILES "${source_path}")
+        endif()
+    endforeach()
+endfunction()
+
+organize_project_sources(Rebuild)
+if(BUILD_TESTING)
+    organize_project_sources(RebuildTests)
+endif()
+source_group(TREE "${imgui_SOURCE_DIR}" PREFIX "ThirdParty/ImGui" FILES ${IMGUI_SOURCES} ${IMGUI_HEADERS})
+source_group("ThirdParty/TinyGLTF" FILES "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.c" ${TINYGLTF_HEADER})
 
 add_dependencies(Rebuild RebuildShaders)
 

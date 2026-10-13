@@ -19,6 +19,9 @@ struct Scene
     std::shared_ptr<const EnvironmentData> environmentData;
     // 分别观察 direct / diffuse IBL / specular IBL。
     bool directLighting = true, diffuseIbl = true, specularIbl = true;
+    // 学习诊断不持久化；Play 副本拥有独立开关，Stop 恢复编辑态。
+    bool normalMapping = true;
+    int normalDebug = 0;
 
     MeshLibrary meshes;
     MaterialLibrary materials;

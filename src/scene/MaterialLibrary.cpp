@@ -1,6 +1,7 @@
 #include "MaterialLibrary.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <utility>
@@ -26,6 +27,11 @@ MaterialLibrary::MaterialLibrary()
 
 uint32_t MaterialLibrary::AddMaterial(SurfaceMaterial material)
 {
+    if (!std::isfinite(material.normalScale))
+        throw std::runtime_error("normal scale must be finite");
+    if (material.normalTexture != 0xFFFFFFFFu &&
+        (material.normalTexture >= m_textures.size() || m_textures[material.normalTexture].srgb))
+        throw std::runtime_error("normal texture must reference a loaded linear image");
     if (material.baseColorTexture != 0xFFFFFFFFu && material.baseColorTexture >= m_textures.size())
         throw std::runtime_error("material references a texture that is not loaded");
     if (m_materials.size() >= UINT32_MAX)

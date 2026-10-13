@@ -105,6 +105,9 @@ private:
     GLint m_metallicLocation = -1;
     GLint m_textureLocation = -1;
     GLint m_emissive = -1;
+    GLint m_normalInfoLocation = -1;
+    GLint m_normalSamplerLocation = -1;
+    GLuint m_flatNormalTexture = 0;
 
     GLuint m_cameraUniformBuffer = 0;
     GLuint m_shadowFramebuffer = 0;

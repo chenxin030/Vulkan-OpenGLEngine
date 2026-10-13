@@ -4,6 +4,7 @@
 #include "scene/Components.h"
 #include "scene/MeshLibrary.h"
 #include "scene/ContentFingerprint.h"
+#include "scene/TangentSpace.h"
 
 #include <tiny_gltf_v3.h>
 #include <stb_image.h>
@@ -19,6 +20,8 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -325,7 +328,7 @@ uint32_t AccessorIndex(const tg3_model& model, const tg3_accessor& accessor, uin
     }
 }
 
-MeshData ReadPrimitiveMesh(const tg3_model& model, const tg3_primitive& primitive)
+MeshData ReadPrimitiveMesh(const tg3_model& model, const tg3_primitive& primitive, bool normalMapped)
 {
     if (primitive.mode >= 0 && primitive.mode != 4)
         throw std::runtime_error("only TRIANGLES glTF primitives are supported");
@@ -364,6 +367,18 @@ MeshData ReadPrimitiveMesh(const tg3_model& model, const tg3_primitive& primitiv
             normals->count != positions.count)
             throw std::runtime_error("NORMAL must be a FLOAT VEC3 matching POSITION count");
     }
+    if (normalMapped && !uv)
+        throw std::runtime_error("normalTexture requires TEXCOORD_0 on its primitive");
+    const tg3_accessor* tangents = nullptr;
+    // glTF 无 NORMAL 时必须忽略导出的 TANGENT，随后以平面法线重新建立基底。
+    if (normals) if (const auto* attribute = FindAttribute(primitive, "TANGENT")) {
+        if (attribute->value < 0 || static_cast<uint32_t>(attribute->value) >= model.accessors_count)
+            throw std::runtime_error("glTF TANGENT accessor index is invalid");
+        tangents = &model.accessors[attribute->value];
+        if (tangents->type != TG3_TYPE_VEC4 || tangents->component_type != TG3_COMPONENT_TYPE_FLOAT ||
+            tangents->normalized || tangents->count != positions.count)
+            throw std::runtime_error("TANGENT must be a non-normalized FLOAT VEC4 matching POSITION count");
+    }
 
     MeshData mesh;
     mesh.vertices.reserve(static_cast<size_t>(positions.count));
@@ -385,6 +400,7 @@ MeshData ReadPrimitiveMesh(const tg3_model& model, const tg3_primitive& primitiv
             const glm::vec4 tex = ReadVec4(*uv, model, i, 2, glm::vec4(0.0f));
             vertex.texCoord = glm::vec2(tex);
         }
+        if (tangents) vertex.tangent = ReadVec4(*tangents, model, i, 4, glm::vec4(0.0f));
         if (colors) {
             const uint32_t colorComponents = static_cast<uint32_t>(tg3_num_components(colors->type));
             const glm::vec4 color = ReadVec4(*colors, model, i, colorComponents, glm::vec4(1.0f));
@@ -416,23 +432,9 @@ MeshData ReadPrimitiveMesh(const tg3_model& model, const tg3_primitive& primitiv
         mesh.indices.resize(static_cast<size_t>(positions.count));
         std::iota(mesh.indices.begin(), mesh.indices.end(), uint16_t{0});
     }
-    if (!normals) {
-        std::vector<glm::vec3> sums(mesh.vertices.size(), glm::vec3(0.0f));
-        std::vector<bool> referenced(mesh.vertices.size(), false);
-        for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
-            const uint16_t ia = mesh.indices[i], ib = mesh.indices[i + 1], ic = mesh.indices[i + 2];
-            referenced[ia] = referenced[ib] = referenced[ic] = true;
-            const glm::vec3 n = glm::cross(mesh.vertices[ib].position - mesh.vertices[ia].position,
-                mesh.vertices[ic].position - mesh.vertices[ia].position);
-            if (glm::dot(n, n) <= 1e-12f) continue;
-            sums[ia] += n; sums[ib] += n; sums[ic] += n;
-        }
-        for (size_t i = 0; i < mesh.vertices.size(); ++i) {
-            if (glm::dot(sums[i], sums[i]) <= 1e-12f && referenced[i])
-                throw std::runtime_error("glTF primitive contains a vertex without a valid normal");
-            if (referenced[i]) mesh.vertices[i].normal = glm::normalize(sums[i]);
-        }
-    }
+    if (!normals) GenerateFlatNormals(mesh);
+    if (tangents) ValidateTangents(mesh);
+    else if (normalMapped) GenerateTangents(mesh);
     return mesh;
 }
 
@@ -484,6 +486,25 @@ PreparedModel Prepare(const tg3_model& model, const std::filesystem::path& image
         prepared.materialKeys.push_back(-1);
     }
     std::vector<uint32_t> imageTextureMap(model.images_count, kNoTexture);
+    std::vector<uint32_t> normalImageMap(model.images_count, kNoTexture);
+    // 先按源 image 解码/hash 一次，再按颜色空间建立资源，避免双用途图片重复进入指纹。
+    std::vector<std::optional<Image>> decodedImages(model.images_count);
+    auto imageResource = [&](uint32_t imageIndex, bool srgb) {
+        auto& map = srgb ? imageTextureMap : normalImageMap;
+        if (map[imageIndex] == kNoTexture) {
+            if (!decodedImages[imageIndex]) {
+                Image decoded = DecodeModelImage(model, model.images[imageIndex], imageRoot, fingerprint);
+                if (decoded.width > 16384 || decoded.height > 16384 ||
+                    static_cast<uint64_t>(decoded.width) * decoded.height > (128ull * 1024ull * 1024ull) / 4)
+                    throw std::runtime_error("glTF texture exceeds the supported image size");
+                decodedImages[imageIndex] = std::move(decoded);
+            }
+            Image image = *decodedImages[imageIndex]; image.srgb = srgb;
+            map[imageIndex] = static_cast<uint32_t>(prepared.textures.size());
+            prepared.textures.push_back(std::move(image));
+        }
+        return map[imageIndex];
+    };
     for (uint32_t materialIndex = 0; materialIndex < model.materials_count; ++materialIndex) {
         const tg3_material& source = model.materials[materialIndex];
         SurfaceMaterial material;
@@ -503,16 +524,19 @@ PreparedModel Prepare(const tg3_model& model, const std::filesystem::path& image
             if (texture.source < 0 || static_cast<uint32_t>(texture.source) >= model.images_count)
                 throw std::runtime_error("glTF texture image source is invalid");
             const uint32_t imageIndex = static_cast<uint32_t>(texture.source);
-            if (imageTextureMap[imageIndex] == kNoTexture) {
-                const tg3_image& image = model.images[imageIndex];
-                Image decoded = DecodeModelImage(model, image, imageRoot, fingerprint);
-                if (decoded.width > 16384 || decoded.height > 16384 ||
-                    static_cast<uint64_t>(decoded.width) * decoded.height > (128ull * 1024ull * 1024ull) / 4)
-                    throw std::runtime_error("glTF texture exceeds the supported image size");
-                imageTextureMap[imageIndex] = static_cast<uint32_t>(prepared.textures.size());
-                prepared.textures.push_back(std::move(decoded));
-            }
-            material.baseColorTexture = imageTextureMap[imageIndex];
+            material.baseColorTexture = imageResource(imageIndex, true);
+        }
+        const auto& normal = source.normal_texture;
+        material.normalScale = static_cast<float>(normal.scale);
+        if (!std::isfinite(material.normalScale)) throw std::runtime_error("normalTexture.scale must be finite");
+        if (normal.index >= 0) {
+            if (normal.tex_coord != 0) throw std::runtime_error("normalTexture supports only TEXCOORD_0");
+            if (static_cast<uint32_t>(normal.index) >= model.textures_count)
+                throw std::runtime_error("glTF normalTexture index is invalid");
+            const auto& texture = model.textures[normal.index];
+            if (texture.source < 0 || static_cast<uint32_t>(texture.source) >= model.images_count)
+                throw std::runtime_error("glTF normalTexture image source is invalid");
+            material.normalTexture = imageResource(static_cast<uint32_t>(texture.source), false);
         }
         prepared.materials.push_back(material);
         prepared.materialKeys.push_back(static_cast<int32_t>(materialIndex));
@@ -536,7 +560,11 @@ PreparedModel Prepare(const tg3_model& model, const std::filesystem::path& image
         const tg3_mesh& mesh = model.meshes[meshIndex];
         meshOffsets[meshIndex] = static_cast<uint32_t>(prepared.meshes.size());
         for (uint32_t p = 0; p < mesh.primitives_count; ++p) {
-            prepared.meshes.push_back(ReadPrimitiveMesh(model, mesh.primitives[p]));
+            const int32_t material = mesh.primitives[p].material;
+            if (material >= 0 && static_cast<uint32_t>(material) >= model.materials_count)
+                throw std::runtime_error("glTF primitive material index is invalid");
+            const bool normalMapped = material >= 0 && prepared.materials[material].normalTexture != kNoTexture;
+            prepared.meshes.push_back(ReadPrimitiveMesh(model, mesh.primitives[p], normalMapped));
             prepared.meshSources.push_back(ModelMeshSource{ {}, meshIndex, p });
         }
     }
@@ -616,6 +644,7 @@ void AppendResources(Scene& scene, PreparedModel& prepared,
     materialMap.reserve(prepared.materials.size());
     for (SurfaceMaterial material : prepared.materials) {
         if (material.baseColorTexture != kNoTexture) material.baseColorTexture += firstTexture;
+        if (material.normalTexture != kNoTexture) material.normalTexture += firstTexture;
         materialMap.push_back(scene.materials.AddMaterial(material));
     }
     if (materialMap.empty()) materialMap.push_back(0);

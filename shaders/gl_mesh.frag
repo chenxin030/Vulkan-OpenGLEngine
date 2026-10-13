@@ -2,7 +2,9 @@
 
 uniform sampler2D uTexture;
 uniform sampler2D uShadowMap;
-uniform vec3 uMaterial;
+uniform vec4 uMaterial;
+uniform vec3 uNormalInfo; // enabled, debug mode, reserved
+uniform sampler2D uNormalMap;
 uniform vec3 uEmissive;
 
 layout(std140, binding = 0) uniform Camera
@@ -25,6 +27,7 @@ layout(location = 1) in vec2 fragTexCoord;
 layout(location = 2) in vec3 fragWorldPosition;
 layout(location = 3) in vec3 fragWorldNormal;
 layout(location = 4) in vec4 fragLightSpacePosition;
+layout(location = 5) in vec4 fragWorldTangent;
 
 layout(location = 0) out vec4 outColor;
 
@@ -37,7 +40,27 @@ void main()
     vec3 albedo = fragColor * texture(uTexture, fragTexCoord).rgb;
     if (uMaterial.z > 0.5) { outColor = vec4(albedo, 1.0); return; }
     const float PI = 3.14159265359;
-    vec3 N = normalize(fragWorldNormal);
+    vec3 Nbase = normalize(fragWorldNormal);
+    vec3 N = Nbase;
+    if (uNormalInfo.x > 0.5 && uMaterial.w != 0.0) {
+        // 插值破坏单位长度/正交关系，在片元端重建世界空间 TBN。
+        vec3 tangent = fragWorldTangent.xyz - Nbase * dot(Nbase, fragWorldTangent.xyz);
+        vec3 nTS = texture(uNormalMap, fragTexCoord).rgb * 2.0 - 1.0;
+        nTS.xy *= uMaterial.w;
+        // 先按最大分量缩放，避免合法但很大的 normalScale 使长度平方溢出。
+        float magnitude = max(abs(nTS.x), max(abs(nTS.y), abs(nTS.z)));
+        if (magnitude > 0.0) nTS /= magnitude;
+        if (dot(tangent, tangent) > 1e-12 && dot(nTS, nTS) > 1e-12) {
+            vec3 T = normalize(tangent);
+            vec3 B = sign(fragWorldTangent.w) * cross(Nbase, T);
+            N = normalize(mat3(T, B, Nbase) * nTS);
+        }
+    }
+    // 诊断颜色仍经过现有 HDR/ACES 显示链，实际法线值由上面的 N 表示。
+    if (uNormalInfo.y > 0.5) {
+        outColor = vec4((uNormalInfo.y < 1.5 ? Nbase : N) * 0.5 + 0.5, 1.0);
+        return;
+    }
     vec3 V = normalize(camera.cameraPosition.xyz - fragWorldPosition);
     vec3 L = normalize(-camera.lightDirection.xyz);
     vec3 H = normalize(V + L);
@@ -65,7 +88,8 @@ void main()
     float visibility = 1.0;
     if (all(greaterThanEqual(shadowCoord, vec3(0.0))) &&
         all(lessThanEqual(shadowCoord, vec3(1.0)))) {
-        float bias = max(0.0012 * (1.0 - NdotL), 0.00035);
+        // 阴影 bias 描述网格表面，不跟随 normalTexture 的微观扰动。
+        float bias = max(0.0012 * (1.0 - max(dot(Nbase, L), 0.0)), 0.00035);
         vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0));
         visibility = 0.0;
         for (int y = -1; y <= 1; ++y)

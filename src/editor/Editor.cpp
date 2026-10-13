@@ -5,6 +5,7 @@
 #include "scene/Scene.h"
 #include "scene/SceneSerializer.h"
 #include "scene/ModelImporter.h"
+#include "scene/RenderSnapshot.h"
 
 #include <imgui.h>
 #include <ImGuizmo.h>
@@ -125,15 +126,20 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
         ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoSavedSettings);
     ImGui::Text("Entities: %zu", scene.registry.EntityCount());
-    std::size_t drawItemCount = 0;
-    scene.registry.ForEachEntity([&scene, &drawItemCount](Entity entity) {
+    std::size_t drawItemCount = 0, skippedTransforms = 0;
+    scene.registry.ForEachEntity([&scene, &drawItemCount, &skippedTransforms](Entity entity) {
         if (scene.registry.TryGet<Transform>(entity) != nullptr &&
             (scene.registry.TryGet<MeshRenderer>(entity) != nullptr ||
              scene.registry.TryGet<SpriteRenderer>(entity) != nullptr)) {
+            if (!IsRenderableTransform(scene.registry.TryGet<Transform>(entity)->world)) {
+                ++skippedTransforms;
+                return;
+            }
             ++drawItemCount;
         }
     });
     ImGui::Text("Draw items: %zu", drawItemCount);
+    if (skippedTransforms) ImGui::Text("Skipped invalid transforms: %zu", skippedTransforms);
     ImGui::Text("Right mouse + WASD: move camera");
     ImGui::Text("Drag a model here to add it at the origin");
     ImGui::BeginDisabled(playing || ImGuizmo::IsUsingAny());
@@ -230,6 +236,9 @@ void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
     ImGui::Checkbox("Direct light", &scene.directLighting);
     ImGui::Checkbox("Diffuse IBL", &scene.diffuseIbl);
     ImGui::Checkbox("Specular IBL", &scene.specularIbl);
+    ImGui::SeparatorText("Surface normals");
+    ImGui::Checkbox("Normal mapping", &scene.normalMapping);
+    ImGui::Combo("View", &scene.normalDebug, "Lighting\0Base normal\0Mapped normal\0");
     ImGui::EndDisabled();
 }
 

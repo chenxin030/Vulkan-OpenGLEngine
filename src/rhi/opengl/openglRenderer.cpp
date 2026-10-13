@@ -153,6 +153,13 @@ void OpenGLRenderer::Init(GLFWwindow* window)
     if (m_hdrColorLocation < 0) throw std::runtime_error("tone-map shader is missing uHdrColor");
     m_gl.glGenVertexArrays(1, &m_fullscreenVertexArray);
     CreateTexture();
+    // 即使没有法线图也绑定有效的线性 fallback；无图的材质仍直接使用 Nbase。
+    m_gl.glGenTextures(1, &m_flatNormalTexture);
+    m_gl.glBindTexture(GL_TEXTURE_2D, m_flatNormalTexture);
+    const uint8_t flatNormal[] = {128,128,255,255};
+    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, flatNormal);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     CreateShadowResources();
     int framebufferWidth = 0, framebufferHeight = 0;
     glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
@@ -189,6 +196,7 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
         glm::value_ptr(snapshot.lightViewProjection));
     for (const DrawItem& item : snapshot.drawItems) {
         if (item.unlit) continue;
+        m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
         const GlMesh& mesh = m_meshes.at(item.meshIndex);
         m_gl.glUniformMatrix4fv(m_shadowModelLocation, 1, GL_FALSE,
             glm::value_ptr(item.worldTransform));
@@ -202,6 +210,7 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     m_gl.glClearColor(0.05f, 0.06f, 0.09f, 0.0f);
     m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    m_gl.glFrontFace(GL_CCW);
     // --- scene --------------------------------------------------------------
     m_gl.glUseProgram(m_shaderProgram);
     for (int i = 0; i < 4; ++i) {
@@ -222,9 +231,17 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
         m_gl.glUniformMatrix4fv(m_modelLocation, 1, GL_FALSE,
             glm::value_ptr(item.worldTransform));
         m_gl.glUniform3fv(m_tintLocation, 1, glm::value_ptr(item.tint));
-        const glm::vec3 material(item.metallicFactor, item.roughnessFactor,
-            item.unlit ? 1.0f : 0.0f);
-        m_gl.glUniform3fv(m_metallicLocation, 1, glm::value_ptr(material));
+        m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
+        const glm::vec4 material(item.metallicFactor, item.roughnessFactor,
+            item.unlit ? 1.0f : 0.0f, item.normalScale);
+        m_gl.glUniform4fv(m_metallicLocation, 1, glm::value_ptr(material));
+        const glm::vec3 normalInfo(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
+            float(snapshot.normalDebug), 0.0f);
+        m_gl.glUniform3fv(m_normalInfoLocation, 1, glm::value_ptr(normalInfo));
+        m_gl.glActiveTexture(GL_TEXTURE0 + 6);
+        m_gl.glBindTexture(GL_TEXTURE_2D, item.normalTextureIndex == UINT32_MAX
+            ? m_flatNormalTexture : m_materialTextures.at(item.normalTextureIndex).handle);
+        m_gl.glActiveTexture(GL_TEXTURE0);
         m_gl.glUniform3fv(m_emissive, 1, glm::value_ptr(item.emissive));
 
         const GLuint texture = item.textureIndex == 0xFFFFFFFFu
@@ -239,6 +256,8 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     m_gl.glBindVertexArray(0);
     m_gl.glUseProgram(0);
 
+    // 恢复默认绕序，避免最后一个镜像 draw 把全屏三角形也剔除。
+    m_gl.glFrontFace(GL_CCW);
     // Tone-map the linear RGBA16F scene target into the sRGB window, then draw UI on top.
     m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     m_gl.glDrawBuffer(GL_BACK);
@@ -282,6 +301,8 @@ void OpenGLRenderer::Cleanup()
 
     DestroyTexture();
     DestroyMaterialTextures();
+    m_gl.glDeleteTextures(1, &m_flatNormalTexture);
+    m_flatNormalTexture = 0;
     m_gl.glDeleteTextures(4, m_environmentTextures.data());
     m_uploadedEnvironment.reset();
     DestroyMeshes();
@@ -396,7 +417,7 @@ void OpenGLRenderer::EnsureMaterialTexturesUploaded(const MaterialLibrary& mater
         texture.height = image.height;
         m_gl.glGenTextures(1, &texture.handle);
         m_gl.glBindTexture(GL_TEXTURE_2D, texture.handle);
-        m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8,
+        m_gl.glTexImage2D(GL_TEXTURE_2D, 0, image.srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8,
             static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), 0,
             GL_RGBA, GL_UNSIGNED_BYTE, image.pixels.data());
         m_gl.glGenerateMipmap(GL_TEXTURE_2D);
@@ -452,6 +473,10 @@ void OpenGLRenderer::UploadMesh(const MeshData& mesh, uint32_t meshIndex)
     m_gl.glEnableVertexAttribArray(2);
     m_gl.glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride,
         reinterpret_cast<const void*>(offsetof(Vertex, texCoord)));
+
+    m_gl.glEnableVertexAttribArray(4);
+    m_gl.glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride,
+        reinterpret_cast<const void*>(offsetof(Vertex, tangent)));
 
     m_gl.glEnableVertexAttribArray(3);
     m_gl.glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, stride,
@@ -548,9 +573,12 @@ void OpenGLRenderer::CreateShaderProgram()
     m_textureLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uTexture");
     m_shadowSamplerLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uShadowMap");
     m_emissive = m_gl.glGetUniformLocation(m_shaderProgram, "uEmissive");
+    m_normalInfoLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uNormalInfo");
+    m_normalSamplerLocation = m_gl.glGetUniformLocation(m_shaderProgram, "uNormalMap");
 
     if (m_modelLocation < 0 || m_tintLocation < 0 || m_metallicLocation < 0 ||
-        m_textureLocation < 0 || m_shadowSamplerLocation < 0 || m_emissive < 0) {
+        m_textureLocation < 0 || m_shadowSamplerLocation < 0 || m_emissive < 0 ||
+        m_normalInfoLocation < 0 || m_normalSamplerLocation < 0) {
         throw std::runtime_error(
             "the mesh shader program is missing uModel or uTexture. A linker removes "
             "uniforms the shader does not actually use, so this usually means the "
@@ -562,6 +590,7 @@ void OpenGLRenderer::CreateShaderProgram()
     m_gl.glUseProgram(m_shaderProgram);
     m_gl.glUniform1i(m_textureLocation, 0);
     m_gl.glUniform1i(m_shadowSamplerLocation, 1);
+    m_gl.glUniform1i(m_normalSamplerLocation, 6);
     m_gl.glUseProgram(0);
 }
 
