@@ -91,6 +91,9 @@ private:
     std::string m_versionString;
 
     bool m_imguiInitialized = false;
+    bool m_glLoaded = false;
+    bool m_imguiContextCreated = false;
+    bool m_imguiGlfwInitialized = false;
 
     std::vector<GlMesh> m_meshes;
     std::vector<GlTexture> m_materialTextures;

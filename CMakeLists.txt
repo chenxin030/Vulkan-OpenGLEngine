@@ -124,6 +124,10 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
 
 add_executable(Rebuild
+    src/core/Application.cpp
+    src/core/LayerStack.cpp
+    src/platform/GlfwEvents.cpp
+    src/editor/EditorLayer.cpp
     src/editor/Editor.cpp
     src/editor/EditorGeometry.cpp
     third_party/ImGuizmo/ImGuizmo.cpp
@@ -159,6 +163,11 @@ if(BUILD_TESTING)
         tests/Stage7Tests.cpp
         tests/Stage8Tests.cpp
         tests/Stage9Tests.cpp
+        tests/Stage10Tests.cpp
+        src/core/Application.cpp
+        src/core/LayerStack.cpp
+        src/platform/GlfwEvents.cpp
+        src/platform/GlfwInput.cpp
         src/editor/EditorGeometry.cpp
         src/scene/TangentSpace.cpp
         third_party/MikkTSpace/mikktspace.c
@@ -174,7 +183,7 @@ if(BUILD_TESTING)
         "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.c"
         src/scene/SceneUpdater.cpp
         src/scene/Systems.cpp)
-    target_link_libraries(RebuildTests PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(RebuildTests PRIVATE nlohmann_json::nlohmann_json glfw)
     target_include_directories(RebuildTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_include_directories(RebuildTests PRIVATE "${tinygltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
     target_compile_definitions(RebuildTests PRIVATE TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache")
@@ -204,10 +213,10 @@ target_sources(Rebuild PRIVATE ${ENGINE_HEADERS} ${SHADER_SOURCES} ${IMGUI_HEADE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ImGuizmo/ImGuizmo.h"
     ${MIKKTSPACE_HEADER} ${TINYGLTF_HEADER})
 
-# 测试项目展示它使用的场景/编辑器几何头文件，不混入渲染后端的头文件。
+# 测试项目展示场景、应用框架和输入桥头文件，不混入具体渲染后端的头文件。
 if(BUILD_TESTING)
     set(TEST_HEADERS ${ENGINE_HEADERS})
-    list(FILTER TEST_HEADERS INCLUDE REGEX "/src/(scene/|editor/EditorGeometry\\.h$)")
+    list(FILTER TEST_HEADERS INCLUDE REGEX "/src/(scene/|core/|platform/(InputState|GlfwInput|GlfwEvents)\\.h$|rhi/Renderer\\.h$|editor/EditorGeometry\\.h$)")
     target_sources(RebuildTests PRIVATE ${TEST_HEADERS} ${MIKKTSPACE_HEADER} ${TINYGLTF_HEADER})
 endif()
 

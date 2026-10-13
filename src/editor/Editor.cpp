@@ -439,7 +439,7 @@ Scene& Editor::ActiveScene(Scene& editScene, std::optional<Scene>& runtimeScene)
     // 放在 Editor 中，是为了把“编辑 / Play 场景切换”的规则与 ApplyPending 放在一起：
     // Play 时 ApplyPending 复制 editScene 到 runtimeScene，Stop 时销毁运行副本。
     // 主循环通过这里取得当前场景，供相机、系统更新、渲染和编辑器 UI 使用。
-    // 两份 Scene 实际由 main 持有；本方法返回引用，不复制场景，也不改变播放状态。
+    // 两份 Scene 实际由 EditorLayer 持有；本方法返回引用，不复制场景，也不改变播放状态。
     // 这里没有读取 Editor 成员，因此它并非必须是成员方法，也可以是静态或自由函数。
     // 当前只是按职责归组；以后若 play 生命周期变复杂，可交给专门的应用/ play 控制器。
     return runtimeScene ? *runtimeScene : editScene;

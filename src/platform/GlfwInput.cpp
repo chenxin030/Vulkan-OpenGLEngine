@@ -12,6 +12,11 @@ InputState GlfwInput::Sample(const EditorInputCapture& capture)
 {
     InputState input;
 
+    if (glfwGetWindowAttrib(m_window, GLFW_FOCUSED) != GLFW_TRUE) {
+        ResetCursorBaseline();
+        return input;
+    }
+
     // --- movement -----------------------------------------------------------
     //  Q/E 垂直移动：
     if (glfwGetKey(m_window, GLFW_KEY_W) == GLFW_PRESS) {
@@ -58,10 +63,16 @@ InputState GlfwInput::Sample(const EditorInputCapture& capture)
 
     // UI 捕获来自上一帧；左键按下的第一帧也必须优先编辑，避免同时按 WASD
     // 时相机先移动一帧，再被操纵轴捕获。左键释放后恢复原有相机输入规则。
-    EditorInputCapture effectiveCapture = capture;
-    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
-        effectiveCapture = { true, true };
+    const EditorInputCapture effectiveCapture = EffectiveCapture(capture);
     FilterCapturedEditorInput(input, effectiveCapture);
 
     return input;
+}
+
+EditorInputCapture GlfwInput::EffectiveCapture(EditorInputCapture capture) const
+{
+    if (glfwGetWindowAttrib(m_window, GLFW_FOCUSED) != GLFW_TRUE ||
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) // (窗口没有焦点 || 当前左键按下)
+        return { true, true };  // 同时阻挡键盘和鼠标输入
+    return capture;
 }

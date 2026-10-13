@@ -1,6 +1,7 @@
 ﻿#include "vulkanRenderer.h"
 
 #include "scene/RenderSnapshot.h"
+#include "core/ScopeExit.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -141,18 +142,16 @@ void VulkanRenderer::Init(GLFWwindow* window) {
 }
 
 void VulkanRenderer::Cleanup() {
-    WaitIdle();
+    // 正常退出由 Application 先 WaitIdle；部分 Init 回收时尚未进入异步帧循环。
 
     ShutdownImGui();
 
-    if (!m_imageAvailableSemaphores.empty()) {
-        for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-            vkDestroySemaphore(m_device, m_imageAvailableSemaphores[i], nullptr);
-            vkDestroyFence(m_device, m_inFlightFences[i], nullptr);
-        }
-        m_imageAvailableSemaphores.resize(0);
-        m_inFlightFences.resize(0);
-    }
+    for (auto semaphore : m_imageAvailableSemaphores)
+        if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(m_device, semaphore, nullptr);
+    for (auto fence : m_inFlightFences)
+        if (fence != VK_NULL_HANDLE) vkDestroyFence(m_device, fence, nullptr);
+    m_imageAvailableSemaphores.clear();
+    m_inFlightFences.clear();
     // m_renderFinishedSemaphores 属于交换链，会在下面的 CleanupSwapChain() 中释放。
 
     if (m_commandPool != VK_NULL_HANDLE) {
@@ -192,6 +191,7 @@ void VulkanRenderer::Cleanup() {
         vkDestroyPipelineLayout(m_device, m_toneMapPipelineLayout, nullptr);
     if (m_toneMapDescriptorSetLayout != VK_NULL_HANDLE)
         vkDestroyDescriptorSetLayout(m_device, m_toneMapDescriptorSetLayout, nullptr);
+    m_toneMapDescriptorSetLayout = VK_NULL_HANDLE;
     DestroyHdrResources();
     if (m_descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
@@ -241,8 +241,7 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     glfwGetFramebufferSize(m_window, &width, &height);
 
     if (width == 0 || height == 0) {
-        // 防止最小化后 spin.
-        glfwWaitEvents();
+        // Application 统一等待；入口处尺寸仍可能变化，因此保留防御性跳帧。
         return;
     }
 
@@ -589,13 +588,11 @@ void VulkanRenderer::CleanupSwapChain()
 }
 
 void VulkanRenderer::RecreateSwapChain() {
-    // 最小化的窗口会显示0x0；阻塞直到它再次有真实大小。
+    // 最小化交回 Application 等待；这里不阻塞，关闭最小化窗口也能退出。
     int width = 0;
     int height = 0;
-    while (width == 0 || height == 0) {
-        glfwGetFramebufferSize(m_window, &width, &height);
-        glfwWaitEvents();
-    }
+    glfwGetFramebufferSize(m_window, &width, &height);
+    if (width == 0 || height == 0 || glfwWindowShouldClose(m_window)) return;
 
     WaitIdle();
 
@@ -1339,7 +1336,9 @@ void VulkanRenderer::CreateShadowPipeline()
     const auto vertexCode = ReadFile(std::string(SHADER_DIR) + "/shadow.vert.spv");
     const auto fragmentCode = ReadFile(std::string(SHADER_DIR) + "/shadow.frag.spv");
     const VkShaderModule vertexModule = CreateShaderModule(vertexCode);
+    ScopeExit vertexGuard([&] { vkDestroyShaderModule(m_device, vertexModule, nullptr); });
     const VkShaderModule fragmentModule = CreateShaderModule(fragmentCode);
+    ScopeExit fragmentGuard([&] { vkDestroyShaderModule(m_device, fragmentModule, nullptr); });
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1426,8 +1425,6 @@ void VulkanRenderer::CreateShadowPipeline()
     info.renderPass = m_shadowRenderPass;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &info, nullptr, &m_shadowPipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create directional shadow pipeline");
-    vkDestroyShaderModule(m_device, fragmentModule, nullptr);
-    vkDestroyShaderModule(m_device, vertexModule, nullptr);
 }
 
 void VulkanRenderer::DestroyShadowResources()
@@ -1501,7 +1498,9 @@ void VulkanRenderer::CreateGraphicsPipeline()
     const std::vector<char> fragShaderCode = ReadFile(std::string(SHADER_DIR) + "/mesh.frag.spv");
 
     const VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
+    ScopeExit vertexGuard([&] { vkDestroyShaderModule(m_device, vertShaderModule, nullptr); });
     const VkShaderModule fragShaderModule = CreateShaderModule(fragShaderCode);
+    ScopeExit fragmentGuard([&] { vkDestroyShaderModule(m_device, fragShaderModule, nullptr); });
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1635,8 +1634,6 @@ void VulkanRenderer::CreateGraphicsPipeline()
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_mirroredPipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create mirrored mesh pipeline");
-    vkDestroyShaderModule(m_device, fragShaderModule, nullptr);
-    vkDestroyShaderModule(m_device, vertShaderModule, nullptr);
 }
 
 void VulkanRenderer::CreateToneMapPipeline()
@@ -1644,7 +1641,9 @@ void VulkanRenderer::CreateToneMapPipeline()
     const auto vertexCode = ReadFile(std::string(SHADER_DIR) + "/tonemap.vert.spv");
     const auto fragmentCode = ReadFile(std::string(SHADER_DIR) + "/tonemap.frag.spv");
     const VkShaderModule vertex = CreateShaderModule(vertexCode);
+    ScopeExit vertexGuard([&] { vkDestroyShaderModule(m_device, vertex, nullptr); });
     const VkShaderModule fragment = CreateShaderModule(fragmentCode);
+    ScopeExit fragmentGuard([&] { vkDestroyShaderModule(m_device, fragment, nullptr); });
 
     std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1718,8 +1717,6 @@ void VulkanRenderer::CreateToneMapPipeline()
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &info, nullptr,
         &m_toneMapPipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create tone-map pipeline");
-    vkDestroyShaderModule(m_device, fragment, nullptr);
-    vkDestroyShaderModule(m_device, vertex, nullptr);
 }
 
 void VulkanRenderer::CreateFramebuffers()
@@ -2017,6 +2014,7 @@ void VulkanRenderer::UploadTexture(const Image& image)
     VmaAllocationInfo stagingInfo{};
     CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryUse::HostVisible,
         stagingBuffer, stagingAllocation, &stagingInfo);
+    ScopeExit stagingGuard([&] { DestroyBuffer(stagingBuffer, stagingAllocation); });
 
     std::memcpy(stagingInfo.pMappedData, image.pixels.data(), static_cast<size_t>(imageSize));
     vmaFlushAllocation(m_allocator, stagingAllocation, 0, imageSize);
@@ -2364,12 +2362,15 @@ void VulkanRenderer::InitImGui()
 {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    m_imguiContextCreated = true;
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
-    ImGui_ImplGlfw_InitForVulkan(m_window, true);
+    if (!ImGui_ImplGlfw_InitForVulkan(m_window, true))
+        throw std::runtime_error("failed to initialize ImGui GLFW backend");
+    m_imguiGlfwInitialized = true;
 
     // ImGui 需要一个descriptor pool来存放它的字体图集，且在交换链重建时依然存在。
     VkDescriptorPoolSize poolSizes[] = {
@@ -2433,8 +2434,14 @@ void VulkanRenderer::ShutdownImGui()
         m_imguiInitialized = false;
     }
 
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    if (m_imguiGlfwInitialized) {
+        ImGui_ImplGlfw_Shutdown();
+        m_imguiGlfwInitialized = false;
+    }
+    if (m_imguiContextCreated) {
+        ImGui::DestroyContext();
+        m_imguiContextCreated = false;
+    }
 
     if (m_imguiDescriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
@@ -2614,6 +2621,7 @@ void VulkanRenderer::UploadToDeviceLocal(const void* source, VkDeviceSize size,
     VmaAllocationInfo stagingInfo{};
 
     CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, MemoryUse::HostVisible, stagingBuffer, stagingAllocation, &stagingInfo);
+    ScopeExit stagingGuard([&] { DestroyBuffer(stagingBuffer, stagingAllocation); });
 
     std::memcpy(stagingInfo.pMappedData, source, static_cast<size_t>(size));
 
@@ -2831,7 +2839,8 @@ void VulkanRenderer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDevice
 void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VmaAllocation& allocation)
 {
     // 空指针是安全的
-    vmaDestroyBuffer(m_allocator, buffer, allocation);
+    if (buffer != VK_NULL_HANDLE || allocation != nullptr)
+        vmaDestroyBuffer(m_allocator, buffer, allocation);
     buffer = VK_NULL_HANDLE;
     allocation = nullptr;
 }
@@ -2849,7 +2858,8 @@ void VulkanRenderer::DestroyImage(VkImage& image, VkImageView& imageView, VmaAll
         vkDestroyImageView(m_device, imageView, nullptr);
         imageView = VK_NULL_HANDLE;
     }
-    vmaDestroyImage(m_allocator, image, allocation);
+    if (image != VK_NULL_HANDLE || allocation != nullptr)
+        vmaDestroyImage(m_allocator, image, allocation);
     image = VK_NULL_HANDLE;
     allocation = nullptr;
 }

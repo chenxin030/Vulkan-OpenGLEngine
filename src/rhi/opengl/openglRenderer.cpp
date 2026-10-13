@@ -2,6 +2,7 @@
 
 #include "scene/MaterialLibrary.h"
 #include "scene/RenderSnapshot.h"
+#include "core/ScopeExit.h"
 #include "scene/Vertex.h"
 
 #include <imgui.h>
@@ -102,6 +103,7 @@ void OpenGLRenderer::Init(GLFWwindow* window)
         throw std::runtime_error(std::string("failed to load OpenGL entry point: ") +
             m_gl.FirstMissing());
     }
+    m_glLoaded = true;
 
     m_versionString = GlStringOrUnknown(m_gl.glGetString(GL_VERSION));
     m_rendererName = GlStringOrUnknown(m_gl.glGetString(GL_RENDERER));
@@ -138,14 +140,14 @@ void OpenGLRenderer::Init(GLFWwindow* window)
     CreateShaderProgram();
     const GLuint toneVertex = CompileShader(GL_VERTEX_SHADER,
         ReadTextFile(ShaderSourcePath("gl_tonemap.vert")), ShaderSourcePath("gl_tonemap.vert"));
+    ScopeExit toneVertexGuard([&] { m_gl.glDeleteShader(toneVertex); });
     const GLuint toneFragment = CompileShader(GL_FRAGMENT_SHADER,
         ReadTextFile(ShaderSourcePath("gl_tonemap.frag")), ShaderSourcePath("gl_tonemap.frag"));
+    ScopeExit toneFragmentGuard([&] { m_gl.glDeleteShader(toneFragment); });
     m_tonemapProgram = m_gl.glCreateProgram();
     m_gl.glAttachShader(m_tonemapProgram, toneVertex);
     m_gl.glAttachShader(m_tonemapProgram, toneFragment);
     m_gl.glLinkProgram(m_tonemapProgram);
-    m_gl.glDeleteShader(toneVertex);
-    m_gl.glDeleteShader(toneFragment);
     GLint toneLinked = GL_FALSE;
     m_gl.glGetProgramiv(m_tonemapProgram, GL_LINK_STATUS, &toneLinked);
     if (toneLinked != GL_TRUE) throw std::runtime_error("failed to link tone-map shader");
@@ -288,6 +290,7 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
 
 void OpenGLRenderer::WaitIdle()
 {
+    if (!m_glLoaded) return;
     // glFinish 是 OpenGL 中最接近 vkDeviceWaitIdle 的东西：它会阻塞，直到所有提交的命令都完成为止。
 
     // 它的开销并不等同。vkDeviceWaitIdle 是等待队列中的工作完成；而 glFinish 则会阻塞管线。
@@ -298,12 +301,15 @@ void OpenGLRenderer::WaitIdle()
 void OpenGLRenderer::Cleanup()
 {
     ShutdownImGui();
+    // Init 可能在入口点加载时失败，此时没有 GPU 对象可释放，也不能调用空函数指针。
+    if (!m_glLoaded) return;
 
     DestroyTexture();
     DestroyMaterialTextures();
     m_gl.glDeleteTextures(1, &m_flatNormalTexture);
     m_flatNormalTexture = 0;
     m_gl.glDeleteTextures(4, m_environmentTextures.data());
+    m_environmentTextures.fill(0);
     m_uploadedEnvironment.reset();
     DestroyMeshes();
     DestroyShadowResources();
@@ -328,6 +334,7 @@ void OpenGLRenderer::Cleanup()
 
     // 和 Vulkan 不同，没有其他东西需要释放：
     // 上下文和交换链属于 GLFW，GLFW 会一直拥有它们直到 glfwDestroyWindow。
+    m_glLoaded = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -542,16 +549,16 @@ void OpenGLRenderer::CreateShaderProgram()
 
     const GLuint vertexShader =
         CompileShader(GL_VERTEX_SHADER, ReadTextFile(vertexPath), vertexPath);
+    ScopeExit vertexGuard([&] { m_gl.glDeleteShader(vertexShader); });
     const GLuint fragmentShader =
         CompileShader(GL_FRAGMENT_SHADER, ReadTextFile(fragmentPath), fragmentPath);
+    ScopeExit fragmentGuard([&] { m_gl.glDeleteShader(fragmentShader); });
 
     m_shaderProgram = m_gl.glCreateProgram();
     m_gl.glAttachShader(m_shaderProgram, vertexShader);
     m_gl.glAttachShader(m_shaderProgram, fragmentShader);
     m_gl.glLinkProgram(m_shaderProgram);
 
-    m_gl.glDeleteShader(vertexShader);
-    m_gl.glDeleteShader(fragmentShader);
 
     GLint status = GL_FALSE;
     m_gl.glGetProgramiv(m_shaderProgram, GL_LINK_STATUS, &status);
@@ -618,14 +625,14 @@ void OpenGLRenderer::CreateShadowResources()
 
     const GLuint vertex = CompileShader(GL_VERTEX_SHADER,
         ReadTextFile(ShaderSourcePath("gl_shadow.vert")), ShaderSourcePath("gl_shadow.vert"));
+    ScopeExit vertexGuard([&] { m_gl.glDeleteShader(vertex); });
     const GLuint fragment = CompileShader(GL_FRAGMENT_SHADER,
         ReadTextFile(ShaderSourcePath("gl_shadow.frag")), ShaderSourcePath("gl_shadow.frag"));
+    ScopeExit fragmentGuard([&] { m_gl.glDeleteShader(fragment); });
     m_shadowProgram = m_gl.glCreateProgram();
     m_gl.glAttachShader(m_shadowProgram, vertex);
     m_gl.glAttachShader(m_shadowProgram, fragment);
     m_gl.glLinkProgram(m_shadowProgram);
-    m_gl.glDeleteShader(vertex);
-    m_gl.glDeleteShader(fragment);
     GLint linked = GL_FALSE;
     m_gl.glGetProgramiv(m_shadowProgram, GL_LINK_STATUS, &linked);
     if (linked != GL_TRUE) throw std::runtime_error("failed to link directional shadow shader");
@@ -815,13 +822,17 @@ void OpenGLRenderer::InitImGui()
 {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    m_imguiContextCreated = true;
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
-    ImGui_ImplGlfw_InitForOpenGL(m_window, true);
-    ImGui_ImplOpenGL3_Init("#version 450");
+    if (!ImGui_ImplGlfw_InitForOpenGL(m_window, true))
+        throw std::runtime_error("failed to initialize ImGui GLFW backend");
+    m_imguiGlfwInitialized = true;
+    if (!ImGui_ImplOpenGL3_Init("#version 450"))
+        throw std::runtime_error("failed to initialize ImGui OpenGL backend");
 
     m_imguiInitialized = true;
 }
@@ -833,8 +844,14 @@ void OpenGLRenderer::ShutdownImGui()
         m_imguiInitialized = false;
     }
 
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    if (m_imguiGlfwInitialized) {
+        ImGui_ImplGlfw_Shutdown();
+        m_imguiGlfwInitialized = false;
+    }
+    if (m_imguiContextCreated) {
+        ImGui::DestroyContext();
+        m_imguiContextCreated = false;
+    }
 }
 
 void OpenGLRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
