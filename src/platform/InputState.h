@@ -17,6 +17,9 @@ struct InputState
     // 当按住右键，且使用本窗口时    时生效。
     bool lookActive = false;
 
+    // 当前窗口客户区逻辑坐标，用于场景 Image 的即时边界检查。
+    glm::vec2 cursorPosition{0.0f};
+
     // // 冲刺键
     bool sprint = false;
 

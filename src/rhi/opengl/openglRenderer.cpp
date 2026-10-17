@@ -163,9 +163,7 @@ void OpenGLRenderer::Init(GLFWwindow* window)
     m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     CreateShadowResources();
-    int framebufferWidth = 0, framebufferHeight = 0;
-    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
-    ResizeHdrTarget(framebufferWidth, framebufferHeight);
+    // 离屏目标由第一次 DrawFrame 的视口请求创建。
     InitImGui();
 }
 
@@ -180,102 +178,125 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     EnsureEnvironmentUploaded(snapshot.environmentData ? snapshot.environmentData : FallbackEnvironment());
     EnsureMeshesUploaded(*snapshot.meshes);
     EnsureMaterialTexturesUploaded(*snapshot.materials);
-    UpdateCameraUniforms(snapshot);
 
     int framebufferWidth = 0;
     int framebufferHeight = 0;
     glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
     if (framebufferWidth == 0 || framebufferHeight == 0) return;
-    if (framebufferWidth != m_hdrWidth || framebufferHeight != m_hdrHeight)
-        ResizeHdrTarget(framebufferWidth, framebufferHeight);
-
-    // Render the opaque scene from the directional light into a fixed-size depth map.
-    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFramebuffer);
-    m_gl.glViewport(0, 0, 1024, 1024);
-    m_gl.glClear(GL_DEPTH_BUFFER_BIT);
-    m_gl.glUseProgram(m_shadowProgram);
-    m_gl.glUniformMatrix4fv(m_shadowLightViewProjectionLocation, 1, GL_FALSE,
-        glm::value_ptr(snapshot.lightViewProjection));
-    for (const DrawItem& item : snapshot.drawItems) {
-        if (item.unlit) continue;
-        m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
-        const GlMesh& mesh = m_meshes.at(item.meshIndex);
-        m_gl.glUniformMatrix4fv(m_shadowModelLocation, 1, GL_FALSE,
-            glm::value_ptr(item.worldTransform));
-        m_gl.glBindVertexArray(mesh.vertexArray);
-        m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT, nullptr);
+    m_viewportImage = {};
+    if (m_viewportRequest.visible && m_viewportRequest.extent.Valid()) {
+        GLint maxTexture = 0, maxViewport[2]{};
+        m_gl.glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+        m_gl.glGetIntegerv(GL_MAX_VIEWPORT_DIMS, maxViewport);
+        ViewportExtent wanted{std::min(m_viewportRequest.extent.width, uint32_t(std::min(maxTexture, maxViewport[0]))),
+            std::min(m_viewportRequest.extent.height, uint32_t(std::min(maxTexture, maxViewport[1])))};
+        if (wanted == ViewportExtent{uint32_t(m_hdrWidth), uint32_t(m_hdrHeight)}) {
+            m_failedViewportExtent = {}; m_viewportStatus.clear();
+        }
+        if (wanted != ViewportExtent{uint32_t(m_hdrWidth), uint32_t(m_hdrHeight)} && wanted != m_failedViewportExtent) {
+            try { ResizeHdrTarget(int(wanted.width), int(wanted.height)); m_failedViewportExtent = {}; m_viewportStatus.clear(); }
+            catch (const std::exception& error) { m_failedViewportExtent = wanted; m_viewportStatus = error.what(); }
+        }
+        m_viewportImage = {uint64_t(m_ldrColorTexture), {uint32_t(m_hdrWidth), uint32_t(m_hdrHeight)},
+            {0, 1}, {1, 0}, m_viewportStatus};
     }
-    m_gl.glBindVertexArray(0);
-    m_gl.glUseProgram(0);
-    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
-    m_gl.glViewport(0, 0, framebufferWidth, framebufferHeight);
-    m_gl.glClearColor(0.05f, 0.06f, 0.09f, 0.0f);
-    m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    if (m_viewportImage.Valid()) {
+        UpdateCameraUniforms(snapshot);
 
-    m_gl.glFrontFace(GL_CCW);
-    // --- scene --------------------------------------------------------------
-    m_gl.glUseProgram(m_shaderProgram);
-    for (int i = 0; i < 4; ++i) {
-        m_gl.glActiveTexture(GL_TEXTURE0 + 2 + i);
-        m_gl.glBindTexture(i == 3 ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP, m_environmentTextures[i]);
-    }
-    m_gl.glActiveTexture(GL_TEXTURE0);
-    m_gl.glActiveTexture(GL_TEXTURE0 + 1);
-    m_gl.glBindTexture(GL_TEXTURE_2D, m_shadowDepthTexture);
-    m_gl.glActiveTexture(GL_TEXTURE0);
-    m_gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_cameraUniformBuffer);
+        // Render the opaque scene from the directional light into a fixed-size depth map.
+        m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFramebuffer);
+        m_gl.glViewport(0, 0, 1024, 1024);
+        m_gl.glClear(GL_DEPTH_BUFFER_BIT);
+        m_gl.glUseProgram(m_shadowProgram);
+        m_gl.glUniformMatrix4fv(m_shadowLightViewProjectionLocation, 1, GL_FALSE,
+            glm::value_ptr(snapshot.lightViewProjection));
+        for (const DrawItem& item : snapshot.drawItems) {
+            if (item.unlit) continue;
+            m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
+            const GlMesh& mesh = m_meshes.at(item.meshIndex);
+            m_gl.glUniformMatrix4fv(m_shadowModelLocation, 1, GL_FALSE,
+                glm::value_ptr(item.worldTransform));
+            m_gl.glBindVertexArray(mesh.vertexArray);
+            m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT, nullptr);
+        }
+        m_gl.glBindVertexArray(0);
+        m_gl.glUseProgram(0);
+        m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
+        m_gl.glViewport(0, 0, m_hdrWidth, m_hdrHeight);
+        m_gl.glClearColor(0.05f, 0.06f, 0.09f, 0.0f);
+        m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    for (const DrawItem& item : snapshot.drawItems) {
-        const GlMesh& mesh = m_meshes[item.meshIndex];
-
-        // 每次绘制一个统一变量，Vulkan push constant。
-        // 两者都是“小型数据，每次绘制都会变化且不需要描述符”；只是写法不同。
-        m_gl.glUniformMatrix4fv(m_modelLocation, 1, GL_FALSE,
-            glm::value_ptr(item.worldTransform));
-        m_gl.glUniform3fv(m_tintLocation, 1, glm::value_ptr(item.tint));
-        m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
-        const glm::vec4 material(item.metallicFactor, item.roughnessFactor,
-            item.unlit ? 1.0f : 0.0f, item.normalScale);
-        m_gl.glUniform4fv(m_metallicLocation, 1, glm::value_ptr(material));
-        const glm::vec3 normalInfo(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
-            float(snapshot.normalDebug), 0.0f);
-        m_gl.glUniform3fv(m_normalInfoLocation, 1, glm::value_ptr(normalInfo));
-        m_gl.glActiveTexture(GL_TEXTURE0 + 6);
-        m_gl.glBindTexture(GL_TEXTURE_2D, item.normalTextureIndex == UINT32_MAX
-            ? m_flatNormalTexture : m_materialTextures.at(item.normalTextureIndex).handle);
+        m_gl.glFrontFace(GL_CCW);
+        // --- scene --------------------------------------------------------------
+        m_gl.glUseProgram(m_shaderProgram);
+        for (int i = 0; i < 4; ++i) {
+            m_gl.glActiveTexture(GL_TEXTURE0 + 2 + i);
+            m_gl.glBindTexture(i == 3 ? GL_TEXTURE_2D : GL_TEXTURE_CUBE_MAP, m_environmentTextures[i]);
+        }
         m_gl.glActiveTexture(GL_TEXTURE0);
-        m_gl.glUniform3fv(m_emissive, 1, glm::value_ptr(item.emissive));
+        m_gl.glActiveTexture(GL_TEXTURE0 + 1);
+        m_gl.glBindTexture(GL_TEXTURE_2D, m_shadowDepthTexture);
+        m_gl.glActiveTexture(GL_TEXTURE0);
+        m_gl.glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_cameraUniformBuffer);
 
-        const GLuint texture = item.textureIndex == 0xFFFFFFFFu
-            ? m_texture : m_materialTextures.at(item.textureIndex).handle;
-        m_gl.glBindTexture(GL_TEXTURE_2D, texture);
+        for (const DrawItem& item : snapshot.drawItems) {
+            const GlMesh& mesh = m_meshes[item.meshIndex];
 
-        m_gl.glBindVertexArray(mesh.vertexArray);
-        m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount),
-            GL_UNSIGNED_SHORT, nullptr);
+            // 每次绘制一个统一变量，Vulkan push constant。
+            // 两者都是“小型数据，每次绘制都会变化且不需要描述符”；只是写法不同。
+            m_gl.glUniformMatrix4fv(m_modelLocation, 1, GL_FALSE,
+                glm::value_ptr(item.worldTransform));
+            m_gl.glUniform3fv(m_tintLocation, 1, glm::value_ptr(item.tint));
+            m_gl.glFrontFace(item.mirrored ? GL_CW : GL_CCW);
+            const glm::vec4 material(item.metallicFactor, item.roughnessFactor,
+                item.unlit ? 1.0f : 0.0f, item.normalScale);
+            m_gl.glUniform4fv(m_metallicLocation, 1, glm::value_ptr(material));
+            const glm::vec3 normalInfo(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
+                float(snapshot.normalDebug), 0.0f);
+            m_gl.glUniform3fv(m_normalInfoLocation, 1, glm::value_ptr(normalInfo));
+            m_gl.glActiveTexture(GL_TEXTURE0 + 6);
+            m_gl.glBindTexture(GL_TEXTURE_2D, item.normalTextureIndex == UINT32_MAX
+                ? m_flatNormalTexture : m_materialTextures.at(item.normalTextureIndex).handle);
+            m_gl.glActiveTexture(GL_TEXTURE0);
+            m_gl.glUniform3fv(m_emissive, 1, glm::value_ptr(item.emissive));
+
+            const GLuint texture = item.textureIndex == 0xFFFFFFFFu
+                ? m_texture : m_materialTextures.at(item.textureIndex).handle;
+            m_gl.glBindTexture(GL_TEXTURE_2D, texture);
+
+            m_gl.glBindVertexArray(mesh.vertexArray);
+            m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount),
+                GL_UNSIGNED_SHORT, nullptr);
+        }
+
+        m_gl.glBindVertexArray(0);
+        m_gl.glUseProgram(0);
+
+        // 恢复默认绕序，避免最后一个镜像 draw 把全屏三角形也剔除。
+        m_gl.glFrontFace(GL_CCW);
+        // Tone-map 到 sRGB LDR 纹理；ImGui 采样自动解码，窗口写入再次编码。
+        m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_ldrFramebuffer);
+        m_gl.glViewport(0, 0, m_hdrWidth, m_hdrHeight);
+        m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        m_gl.glDisable(GL_DEPTH_TEST);
+        m_gl.glUseProgram(m_tonemapProgram);
+        m_gl.glUniform1i(m_hdrColorLocation, 0);
+        m_gl.glActiveTexture(GL_TEXTURE0);
+        m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrColorTexture);
+        m_gl.glBindVertexArray(m_fullscreenVertexArray);
+        m_gl.glDrawArrays(GL_TRIANGLES, 0, 3);
+        m_gl.glBindVertexArray(0);
+        m_gl.glUseProgram(0);
+        m_gl.glEnable(GL_DEPTH_TEST);
+
     }
-
-    m_gl.glBindVertexArray(0);
-    m_gl.glUseProgram(0);
-
-    // 恢复默认绕序，避免最后一个镜像 draw 把全屏三角形也剔除。
-    m_gl.glFrontFace(GL_CCW);
-    // Tone-map the linear RGBA16F scene target into the sRGB window, then draw UI on top.
+    // 窗口只呈现编辑器；场景已成为普通 Image，不再覆盖整窗背景。
     m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
     m_gl.glDrawBuffer(GL_BACK);
     m_gl.glReadBuffer(GL_BACK);
     m_gl.glViewport(0, 0, framebufferWidth, framebufferHeight);
+    m_gl.glClearColor(0.025f, 0.025f, 0.03f, 1.0f);
     m_gl.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    m_gl.glDisable(GL_DEPTH_TEST);
-    m_gl.glUseProgram(m_tonemapProgram);
-    m_gl.glUniform1i(m_hdrColorLocation, 0);
-    m_gl.glActiveTexture(GL_TEXTURE0);
-    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrColorTexture);
-    m_gl.glBindVertexArray(m_fullscreenVertexArray);
-    m_gl.glDrawArrays(GL_TRIANGLES, 0, 3);
-    m_gl.glBindVertexArray(0);
-    m_gl.glUseProgram(0);
-    m_gl.glEnable(GL_DEPTH_TEST);
 
     // --- overlay ------------------------------------------------------------
     ImGui_ImplOpenGL3_NewFrame();
@@ -653,45 +674,58 @@ void OpenGLRenderer::DestroyShadowResources()
 void OpenGLRenderer::ResizeHdrTarget(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
-    if (m_hdrFramebuffer == 0) m_gl.glGenFramebuffers(1, &m_hdrFramebuffer);
-    if (m_hdrColorTexture == 0) m_gl.glGenTextures(1, &m_hdrColorTexture);
-    if (m_hdrDepthTexture == 0) m_gl.glGenTextures(1, &m_hdrDepthTexture);
-
-    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrColorTexture);
-    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
-        GL_RGBA, GL_HALF_FLOAT, nullptr);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    m_gl.glBindTexture(GL_TEXTURE_2D, m_hdrDepthTexture);
-    m_gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
-        GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
-    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-        GL_TEXTURE_2D, m_hdrColorTexture, 0);
-    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-        GL_TEXTURE_2D, m_hdrDepthTexture, 0);
+    // 候选目标完整成功后才发布；分配失败保留上一套，回调尚未构建任何 Image draw data。
+    GLuint hdrFbo = 0, hdr = 0, depth = 0, ldrFbo = 0, ldr = 0;
+    ScopeExit rollback([&] {
+        if (hdrFbo) m_gl.glDeleteFramebuffers(1, &hdrFbo);
+        if (ldrFbo) m_gl.glDeleteFramebuffers(1, &ldrFbo);
+        if (hdr) m_gl.glDeleteTextures(1, &hdr);
+        if (depth) m_gl.glDeleteTextures(1, &depth);
+        if (ldr) m_gl.glDeleteTextures(1, &ldr);
+        m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    });
+    const auto texture = [&](GLuint& id, GLint format, GLenum channels, GLenum type, GLint filter) {
+        m_gl.glGenTextures(1, &id);
+        m_gl.glBindTexture(GL_TEXTURE_2D, id);
+        m_gl.glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, channels, type, nullptr);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        m_gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (m_gl.glGetError() != GL_NO_ERROR) throw std::runtime_error("OpenGL viewport texture allocation failed");
+    };
+    texture(hdr, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, GL_LINEAR);
+    texture(depth, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, GL_NEAREST);
+    texture(ldr, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, GL_LINEAR);
+    m_gl.glGenFramebuffers(1, &hdrFbo);
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, hdrFbo);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, hdr, 0);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
     if (m_gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        throw std::runtime_error("OpenGL RGBA16F HDR framebuffer is incomplete");
-    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    m_hdrWidth = width;
-    m_hdrHeight = height;
+        throw std::runtime_error("OpenGL viewport HDR framebuffer is incomplete");
+    m_gl.glGenFramebuffers(1, &ldrFbo);
+    m_gl.glBindFramebuffer(GL_FRAMEBUFFER, ldrFbo);
+    m_gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ldr, 0);
+    if (m_gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        throw std::runtime_error("OpenGL viewport LDR framebuffer is incomplete");
+    WaitIdle(); // resize 才等待；普通帧遵循同一 GL context 的命令顺序。
+    DestroyHdrTarget();
+    m_hdrFramebuffer = hdrFbo; m_hdrColorTexture = hdr; m_hdrDepthTexture = depth;
+    m_ldrFramebuffer = ldrFbo; m_ldrColorTexture = ldr;
+    hdrFbo = hdr = depth = ldrFbo = ldr = 0;
+    m_hdrWidth = width; m_hdrHeight = height;
 }
 
 void OpenGLRenderer::DestroyHdrTarget()
 {
     if (m_hdrFramebuffer != 0) m_gl.glDeleteFramebuffers(1, &m_hdrFramebuffer);
+    if (m_ldrFramebuffer != 0) m_gl.glDeleteFramebuffers(1, &m_ldrFramebuffer);
     if (m_hdrColorTexture != 0) m_gl.glDeleteTextures(1, &m_hdrColorTexture);
     if (m_hdrDepthTexture != 0) m_gl.glDeleteTextures(1, &m_hdrDepthTexture);
-    m_hdrFramebuffer = m_hdrColorTexture = m_hdrDepthTexture = 0;
+    if (m_ldrColorTexture != 0) m_gl.glDeleteTextures(1, &m_ldrColorTexture);
+    m_hdrFramebuffer = m_hdrColorTexture = m_hdrDepthTexture = m_ldrFramebuffer = m_ldrColorTexture = 0;
     m_hdrWidth = m_hdrHeight = 0;
+    m_viewportImage = {};
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +817,7 @@ void OpenGLRenderer::UpdateCameraUniforms(const RenderSnapshot& snapshot)
 {
     int framebufferWidth = 0;
     int framebufferHeight = 0;
-    glfwGetFramebufferSize(m_window, &framebufferWidth, &framebufferHeight);
+    framebufferWidth = m_hdrWidth; framebufferHeight = m_hdrHeight;
 
     GlCameraUniforms uniforms;
     uniforms.view = snapshot.camera.ViewMatrix();
@@ -826,6 +860,8 @@ void OpenGLRenderer::InitImGui()
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Image 不抢 ActiveId；窗口只能从标题栏移动，避免场景点击/操纵轴带动整个面板。
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplGlfw_InitForOpenGL(m_window, true))

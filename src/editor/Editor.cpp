@@ -37,29 +37,72 @@ std::filesystem::path ResolveEditorPath(const char* text)
 }
 
 std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVec2& displaySize,
-    bool playing, bool& hovered, float aspect, int& operation, bool& local, bool& gizmoCaptured)
+    bool playing, bool& hovered, bool& focused, bool& cameraGesture, ViewportRect& rect,
+    ViewportRequest& request, const ViewportImage& image, const Camera& renderCamera,
+    int& operation, bool& local, bool& gizmoCaptured)
 {
     const float left = 360.0f;
     const float right = std::max(left + 160.0f, displaySize.x - 270.0f);
     const float top = 8.0f;
     const float bottom = std::max(top + 100.0f, displaySize.y - 8.0f);
 
-    ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(right - left, bottom - top), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.0f);
-    ImGui::Begin("Scene View", nullptr,
-        ImGuiWindowFlags_NoDecoration |
-        ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoNavInputs |
-        ImGuiWindowFlags_NoNavFocus |
-        ImGuiWindowFlags_NoSavedSettings);
-
-    hovered = ImGui::IsWindowHovered();
+    ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(right - left, bottom - top), ImGuiCond_FirstUseEver);
+    hovered = false; focused = false; gizmoCaptured = false;
+    if (!ImGui::Begin("Scene View", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+        request.visible = false; rect = {}; cameraGesture = false;
+        ImGuizmo::Enable(false);
+        ImGui::End(); return {};
+    }
+    ImGui::Text("Target: %u x %u pixels", image.extent.width, image.extent.height);
+    // 在视口上下文中保持 scene 参数，这样它的状态就可以保持可见
+    // 同时不会在这个共享编辑器中引入特定渲染器的依赖。
+    std::size_t drawItemCount = 0, skippedTransforms = 0;
+    scene.registry.ForEachEntity([&](Entity entity) {
+        const Transform* transform = scene.registry.TryGet<Transform>(entity);
+        if (transform && (scene.registry.Has<MeshRenderer>(entity) || scene.registry.Has<SpriteRenderer>(entity))) {
+            if (IsRenderableTransform(transform->world)) ++drawItemCount;
+            else ++skippedTransforms;
+        }
+    });
+    ImGui::SameLine();
+    ImGui::Text("Entities: %zu | Draw: %zu | Skipped: %zu", scene.registry.EntityCount(), drawItemCount, skippedTransforms);
+    ImGui::TextUnformatted("Right mouse + WASD: camera | Drag model: instance");
+    ImGui::BeginDisabled(playing || ImGuizmo::IsUsingAny());
+    if (ImGui::RadioButton("Move", operation == 0)) operation = 0;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Rotate", operation == 1)) operation = 1;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Scale", operation == 2)) operation = 2;
+    if (operation == 2) ImGui::TextUnformatted("Scale uses local axes");
+    else ImGui::Checkbox("Local axes", &local);
+    ImGui::EndDisabled();
+    if (!image.status.empty()) ImGui::TextWrapped("%s", image.status.c_str());
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const ImVec2 framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+    request.extent = ViewportPixels({available.x, available.y}, {framebufferScale.x, framebufferScale.y});
+    request.visible = request.extent.Valid();
+    rect = FitViewport({origin.x, origin.y}, {available.x, available.y}, image.extent,
+        {framebufferScale.x, framebufferScale.y});
+    if (!request.visible || !image.Valid() || rect.size.x <= 0 || rect.size.y <= 0) {
+        cameraGesture = false; ImGuizmo::Enable(false);
+        ImGui::End(); return {};
+    }
+    ImGui::SetCursorScreenPos(ImVec2(rect.min.x, rect.min.y));
+    // Image 和 Dummy 一样不抢 ActiveId，因此可同时作为拖放目标及操纵轴背景。
+    ImGui::Image(static_cast<ImTextureID>(image.textureId), ImVec2(rect.size.x, rect.size.y),
+        ImVec2(image.uv0.x, image.uv0.y), ImVec2(image.uv1.x, image.uv1.y));
+    hovered = ImGui::IsItemHovered();
+    if (hovered && (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right))) ImGui::SetWindowFocus();
+    focused = ImGui::IsWindowFocused();
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        cameraGesture = hovered && focused && !ImGui::IsAnyItemActive() &&
+            ImGui::GetDragDropPayload() == nullptr;
+    if (!hovered || !focused || !ImGui::IsMouseDown(ImGuiMouseButton_Right)) cameraGesture = false;
+    const float aspect = image.extent.Aspect();
     std::optional<std::string> requested;
-    // Dummy 只登记拖放目标，不抢 ActiveId；InvisibleButton 会阻止 ImGuizmo 开始拖动。
-    ImGui::Dummy(ImGui::GetContentRegionAvail());
     if (!playing && ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MODEL_ASSET")) {
             const char* id = static_cast<const char*>(payload->Data);
@@ -71,11 +114,9 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
     }
 
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    const ImVec2 min = ImGui::GetWindowPos();
-    const ImVec2 max(min.x + ImGui::GetWindowSize().x, min.y + ImGui::GetWindowSize().y);
+    const ImVec2 min(rect.min.x, rect.min.y);
+    const ImVec2 max(rect.min.x + rect.size.x, rect.min.y + rect.size.y);
     drawList->AddRect(min, max, IM_COL32(115, 145, 180, 170));
-    drawList->AddText(ImVec2(min.x + 12.0f, min.y + 10.0f), IM_COL32(225, 230, 240, 230),
-        "Viewport - scene is rendered to the application surface");
 
     gizmoCaptured = false;
     const Entity selected = editor.SelectedEntity();
@@ -87,15 +128,17 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
     const bool cameraLook = ImGui::IsMouseDown(ImGuiMouseButton_Right);
     // 一个固定 widget ID：Enable(false) 在换场景/Play 时也能取消上一帧拖动。
     ImGuizmo::PushID("Scene transform");
-    ImGuizmo::Enable(!playing && editable && !dragging && !cameraLook);
-    if (editable && !playing && aspect > 0 && displaySize.x > 0 && displaySize.y > 0) {
-        const glm::mat4 view = scene.camera.ViewMatrix();
-        const glm::mat4 projection = EditorGeometry::Projection(scene.camera, aspect);
+    // 被其他窗口遮挡时不能开始操纵轴拖动；已开始的拖动允许离开 Image 继续。
+    ImGuizmo::Enable(!playing && editable && !dragging && !cameraLook && focused &&
+        (hovered || ImGuizmo::IsUsing()));
+    if (editable && !playing && aspect > 0 && rect.size.x > 0 && rect.size.y > 0) {
+        const glm::mat4 view = renderCamera.ViewMatrix();
+        const glm::mat4 projection = EditorGeometry::Projection(renderCamera, aspect);
         glm::mat4 candidate = transform->local;
         ImGuizmo::SetDrawlist(drawList);
-        // 矩阵对应整窗画面，SetRect 必须也是整窗；绘制另按透明交互区裁剪。
-        ImGuizmo::SetRect(0, 0, displaySize.x, displaySize.y);
-        ImGuizmo::SetOrthographic(scene.camera.projection == CameraProjection::Orthographic);
+        // 与 Image 使用同一逻辑矩形；Vulkan 投影翻转只留在 GPU 后端。
+        ImGuizmo::SetRect(rect.min.x, rect.min.y, rect.size.x, rect.size.y);
+        ImGuizmo::SetOrthographic(renderCamera.projection == CameraProjection::Orthographic);
         const ImGuizmo::OPERATION ops[] = { ImGuizmo::TRANSLATE, ImGuizmo::ROTATE, ImGuizmo::SCALE };
         drawList->PushClipRect(min, max, true);
         if (ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(projection), ops[operation],
@@ -111,47 +154,12 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
     if (hovered && !dragging && !cameraLook && !gizmoCaptured &&
         !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
-        editor.Select(EditorGeometry::Pick(scene, { mouse.x, mouse.y },
-            { displaySize.x, displaySize.y }, aspect));
+        editor.Select(EditorGeometry::Pick(scene, { mouse.x - rect.min.x, mouse.y - rect.min.y },
+            rect.size, aspect, &renderCamera));
     }
 
     ImGui::End();
 
-    // 在视口上下文中保持 scene 参数，这样它的状态就可以保持可见
-    // 同时不会在这个共享编辑器中引入特定渲染器的依赖。
-    ImGui::SetNextWindowPos(ImVec2(left + 12.0f, top + 34.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::Begin("Viewport Status", nullptr,
-        ImGuiWindowFlags_NoDecoration |
-        ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoSavedSettings);
-    ImGui::Text("Entities: %zu", scene.registry.EntityCount());
-    std::size_t drawItemCount = 0, skippedTransforms = 0;
-    scene.registry.ForEachEntity([&scene, &drawItemCount, &skippedTransforms](Entity entity) {
-        if (scene.registry.TryGet<Transform>(entity) != nullptr &&
-            (scene.registry.TryGet<MeshRenderer>(entity) != nullptr ||
-             scene.registry.TryGet<SpriteRenderer>(entity) != nullptr)) {
-            if (!IsRenderableTransform(scene.registry.TryGet<Transform>(entity)->world)) {
-                ++skippedTransforms;
-                return;
-            }
-            ++drawItemCount;
-        }
-    });
-    ImGui::Text("Draw items: %zu", drawItemCount);
-    if (skippedTransforms) ImGui::Text("Skipped invalid transforms: %zu", skippedTransforms);
-    ImGui::Text("Right mouse + WASD: move camera");
-    ImGui::Text("Drag a model here to add it at the origin");
-    ImGui::BeginDisabled(playing || ImGuizmo::IsUsingAny());
-    if (ImGui::RadioButton("Move", operation == 0)) operation = 0;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate", operation == 1)) operation = 1;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Scale", operation == 2)) operation = 2;
-    if (operation == 2) ImGui::TextUnformatted("Scale uses local axes");
-    else ImGui::Checkbox("Local axes", &local);
-    ImGui::EndDisabled();
-    ImGui::End();
     return requested;
 }
 
@@ -320,7 +328,7 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
 
 } // namespace
 
-void Editor::Draw(Scene& scene, bool playing, glm::vec2 framebufferSize)
+void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const Camera& renderCamera)
 {
     ImGuizmo::BeginFrame();
     if (!scene.registry.IsAlive(m_selectedEntity)) {
@@ -349,9 +357,9 @@ void Editor::Draw(Scene& scene, bool playing, glm::vec2 framebufferSize)
     } else if (ImGui::Button("Play")) m_requestPlay = true;
     if (!m_status.empty()) ImGui::TextWrapped("%s", m_status.c_str());
     ImGui::End();
-    const float aspect = framebufferSize.y > 0 ? framebufferSize.x / framebufferSize.y : 0;
     if (const auto requested = DrawViewport(*this, scene, displaySize, playing, m_viewportHovered,
-        aspect, m_gizmoOperation, m_gizmoLocal, m_gizmoCaptured))
+        m_viewportFocused, m_cameraGesture, m_viewportRect, m_viewportRequest, image, renderCamera,
+        m_gizmoOperation, m_gizmoLocal, m_gizmoCaptured))
         m_requestInstance = requested;
     DrawHierarchy(*this, scene);
     if (const auto requested = DrawModelAssets(scene, playing)) m_requestInstance = requested;
@@ -453,11 +461,21 @@ EditorInputCapture Editor::InputCapture() const
 
     const ImGuiIO& io = ImGui::GetIO();
     if (m_gizmoCaptured || ImGuizmo::IsUsingAny()) return { true, true };
-    const bool viewportInput = m_viewportHovered && !ImGui::IsAnyItemActive() &&
+    const bool viewportInput = m_viewportHovered && m_viewportFocused && !ImGui::IsAnyItemActive() &&
         ImGui::GetDragDropPayload() == nullptr;
     // 空闲 UI 的导航焦点也会捕获键盘；在未编辑或拖放的视口中让 WASD 通行。
     return EditorInputCapture{ io.WantCaptureKeyboard && !viewportInput,
         io.WantCaptureMouse && !viewportInput };
+}
+
+InputState Editor::CameraInput(InputState input)
+{
+    const bool blocked = m_gizmoCaptured || ImGuizmo::IsUsingAny() ||
+        ImGui::IsAnyItemActive() || ImGui::GetDragDropPayload() != nullptr;
+    input = FilterViewportCamera(input, m_viewportRect, m_viewportFocused,
+        m_cameraGesture, blocked, m_cameraAdmitted);
+    if (!m_cameraAdmitted) m_cameraGesture = false;
+    return input;
 }
 
 bool Editor::HasSelection() const

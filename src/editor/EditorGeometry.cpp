@@ -75,12 +75,13 @@ Entity RootEntity(const Scene& scene, Entity entity)
     return {};
 }
 
-Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect)
+Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect, const Camera* renderCamera)
 {
     if (!(size.x > 0 && size.y > 0 && aspect > 0) || !std::isfinite(aspect) ||
         !std::isfinite(mouse.x) || !std::isfinite(mouse.y) ||
         mouse.x < 0 || mouse.y < 0 || mouse.x >= size.x || mouse.y >= size.y) return {};
-    const glm::mat4 viewProjection = Projection(scene.camera, aspect) * scene.camera.ViewMatrix();
+    const Camera& camera = renderCamera ? *renderCamera : scene.camera;
+    const glm::mat4 viewProjection = Projection(camera, aspect) * camera.ViewMatrix();
     if (!Finite(viewProjection) || std::abs(glm::determinant(viewProjection)) < 1e-12f) return {};
     const glm::mat4 inverse = glm::inverse(viewProjection);
     const glm::vec2 ndc(mouse.x / size.x * 2 - 1, 1 - mouse.y / size.y * 2);

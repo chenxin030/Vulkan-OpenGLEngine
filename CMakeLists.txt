@@ -164,6 +164,7 @@ if(BUILD_TESTING)
         tests/Stage8Tests.cpp
         tests/Stage9Tests.cpp
         tests/Stage10Tests.cpp
+        tests/Stage11Tests.cpp
         src/core/Application.cpp
         src/core/LayerStack.cpp
         src/platform/GlfwEvents.cpp
@@ -216,7 +217,7 @@ target_sources(Rebuild PRIVATE ${ENGINE_HEADERS} ${SHADER_SOURCES} ${IMGUI_HEADE
 # 测试项目展示场景、应用框架和输入桥头文件，不混入具体渲染后端的头文件。
 if(BUILD_TESTING)
     set(TEST_HEADERS ${ENGINE_HEADERS})
-    list(FILTER TEST_HEADERS INCLUDE REGEX "/src/(scene/|core/|platform/(InputState|GlfwInput|GlfwEvents)\\.h$|rhi/Renderer\\.h$|editor/EditorGeometry\\.h$)")
+    list(FILTER TEST_HEADERS INCLUDE REGEX "/src/(scene/|core/|platform/(InputState|GlfwInput|GlfwEvents)\\.h$|rhi/(Renderer|Viewport)\\.h$|editor/(EditorGeometry|ViewportInteraction)\\.h$)")
     target_sources(RebuildTests PRIVATE ${TEST_HEADERS} ${MIKKTSPACE_HEADER} ${TINYGLTF_HEADER})
 endif()
 

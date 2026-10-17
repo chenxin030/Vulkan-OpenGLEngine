@@ -17,8 +17,8 @@ glm::mat4 Compose(const Trs& value);
 std::optional<Trs> Decompose(const glm::mat4& matrix);
 Entity RootEntity(const Scene& scene, Entity entity);
 
-// mouse/size 为整窗渲染表面的逻辑坐标；aspect 来自实际 framebuffer pixel size。
+// mouse/size 为 Image 内的逻辑坐标；aspect 来自实际离屏 pixel size。
 // 返回最近可见三角形所属的顶层实体。屏幕 Y 向下，几何计算的 NDC Y 向上。
-Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect);
+Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect, const Camera* renderCamera = nullptr);
 glm::mat4 Projection(const Camera& camera, float aspect);
 }

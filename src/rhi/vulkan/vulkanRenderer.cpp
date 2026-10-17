@@ -115,8 +115,12 @@ void VulkanRenderer::Init(GLFWwindow* window) {
 
     CreateSwapChain();
     CreateImageViews();
-    CreateDepthResources();
-    CreateHdrResources();
+    m_hdrFormat = FindSupportedFormat(
+        {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT},
+        VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+    m_ldrFormat = FindSupportedFormat({VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB},
+        VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
 
     CreateCommandPool();
     CreateCommandBuffers();
@@ -127,11 +131,12 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateUniformBuffers();
     CreateDescriptorSetLayout();
     CreateDescriptorPool();
-    CreateToneMapDescriptorSet();
+    CreateToneMapDescriptorSetLayout();
     CreateShadowResources();
     CreateDescriptorSets();
     CreateEnvironmentDescriptorSets();
     CreateRenderPass();
+    CreateUiRenderPass();
     CreateGraphicsPipeline();
     CreateToneMapPipeline();
     CreateFramebuffers();
@@ -144,6 +149,8 @@ void VulkanRenderer::Init(GLFWwindow* window) {
 void VulkanRenderer::Cleanup() {
     // 正常退出由 Application 先 WaitIdle；部分 Init 回收时尚未进入异步帧循环。
 
+    DestroyViewportTargets(m_viewportTargets);
+    m_viewportExtent = {}; m_viewportImage = {};
     ShutdownImGui();
 
     for (auto semaphore : m_imageAvailableSemaphores)
@@ -192,7 +199,6 @@ void VulkanRenderer::Cleanup() {
     if (m_toneMapDescriptorSetLayout != VK_NULL_HANDLE)
         vkDestroyDescriptorSetLayout(m_device, m_toneMapDescriptorSetLayout, nullptr);
     m_toneMapDescriptorSetLayout = VK_NULL_HANDLE;
-    DestroyHdrResources();
     if (m_descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayout, nullptr);
         m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -257,6 +263,12 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
         ReloadTexture();
     }
 
+    EnsureViewportTargets();
+    m_viewportImage = {};
+    m_viewportImage.status = m_viewportStatus;
+    if (m_viewportRequest.visible && m_viewportRequest.extent.Valid() && m_viewportExtent.Valid())
+        m_viewportImage = {uint64_t(m_viewportTargets[m_currentFrame].imguiSet), m_viewportExtent,
+            {0, 0}, {1, 1}, m_viewportStatus};
     vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
     EnsureMaterialTexturesUploaded(*snapshot.materials);
     EnsureEnvironmentUploaded(snapshot.environmentData ? snapshot.environmentData : FallbackEnvironment());
@@ -604,38 +616,17 @@ void VulkanRenderer::RecreateSwapChain() {
 
     CreateSwapChain();
     CreateImageViews();
-    CreateDepthResources();
-    CreateHdrResources();
-    VkDescriptorImageInfo hdrInfo{};
-    hdrInfo.imageView = m_hdrImageView;
-    hdrInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet hdrWrite{};
-    hdrWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    hdrWrite.dstSet = m_toneMapDescriptorSet;
-    hdrWrite.dstBinding = 0;
-    hdrWrite.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-    hdrWrite.descriptorCount = 1;
-    hdrWrite.pImageInfo = &hdrInfo;
-    vkUpdateDescriptorSets(m_device, 1, &hdrWrite, 0, nullptr);
-
     if (m_swapChainImageFormat != previousFormat) {
-        // 顺序很重要：ImGui 的 Vulkan 后端会把渲染通道烘焙到它自己的管线中，
-        // 所以必须在渲染通道被销毁之前关闭它。
+        // 只重建 UI pass/backend；离屏格式和场景管线不依赖交换链。
         const bool hadImGuiBackend = m_imguiInitialized;
         if (hadImGuiBackend) {
-            ImGui_ImplVulkan_Shutdown();
-            m_imguiInitialized = false;
+            UnregisterViewportTextures(); // RemoveTexture 需要仍活着的 backend/pool。
+            ImGui_ImplVulkan_Shutdown(); m_imguiInitialized = false;
         }
-
-        // 表面格式发生了变化（很少见），让渲染通道和所有以此为基础构建的管线都过时了。
-        DestroyPipelineResources();
-        CreateRenderPass();
-        CreateGraphicsPipeline();
-        CreateToneMapPipeline();
-
-        if (hadImGuiBackend) {
-            InitImGuiVulkanBackend();
-        }
+        if (m_uiRenderPass) vkDestroyRenderPass(m_device, m_uiRenderPass, nullptr);
+        m_uiRenderPass = VK_NULL_HANDLE;
+        CreateUiRenderPass();
+        if (hadImGuiBackend) { InitImGuiVulkanBackend(); RegisterViewportTextures(); }
     }
 
     CreateFramebuffers();
@@ -839,13 +830,13 @@ void VulkanRenderer::CreateDescriptorPool()
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = static_cast<uint32_t>(kMaxFramesInFlight) * (7 + 3 * maxMaterialTextures);
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-    poolSizes[2].descriptorCount = 1;
+    poolSizes[2].descriptorCount = 2 * kMaxFramesInFlight; // 活动目标和 resize 候选并存。
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = static_cast<uint32_t>(kMaxFramesInFlight) * (2 + maxMaterialTextures) + 1;
+    poolInfo.maxSets = static_cast<uint32_t>(kMaxFramesInFlight) * (2 + maxMaterialTextures) + 2 * kMaxFramesInFlight;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
@@ -853,7 +844,7 @@ void VulkanRenderer::CreateDescriptorPool()
     }
 }
 
-void VulkanRenderer::CreateToneMapDescriptorSet()
+void VulkanRenderer::CreateToneMapDescriptorSetLayout()
 {
     VkDescriptorSetLayoutBinding inputBinding{};
     inputBinding.binding = 0;
@@ -868,25 +859,6 @@ void VulkanRenderer::CreateToneMapDescriptorSet()
         &m_toneMapDescriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create tone-map descriptor layout");
 
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_toneMapDescriptorSetLayout;
-    if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_toneMapDescriptorSet) != VK_SUCCESS)
-        throw std::runtime_error("failed to allocate tone-map descriptor set");
-
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageView = m_hdrImageView;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_toneMapDescriptorSet;
-    write.dstBinding = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imageInfo;
-    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
 void VulkanRenderer::CreateDescriptorSets() 
@@ -1202,36 +1174,125 @@ void VulkanRenderer::CreateImageViews() {
     }
 }
 
-void VulkanRenderer::CreateDepthResources() {
-    VkFormat depthFormat = FindDepthFormat();
-    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL, 
-                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, m_depthImage, m_depthImageAllocation);
-    m_depthImageView = CreateImageView(m_depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
-}
-
-void VulkanRenderer::CreateHdrResources()
+void VulkanRenderer::UnregisterViewportTextures()
 {
-    m_hdrFormat = FindSupportedFormat(
-        { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT },
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
-    CreateImage(m_swapChainExtent.width, m_swapChainExtent.height, 1, m_hdrFormat,
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
-        m_hdrImage, m_hdrImageAllocation);
-    m_hdrImageView = CreateImageView(m_hdrImage, m_hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
-}
-
-void VulkanRenderer::DestroyHdrResources()
-{
-    if (m_hdrImageView != VK_NULL_HANDLE) {
-        vkDestroyImageView(m_device, m_hdrImageView, nullptr);
-        m_hdrImageView = VK_NULL_HANDLE;
+    // 退出/格式变化前先解除注册；backend 的布局与描述符池必须仍活着。
+    for (auto& target : m_viewportTargets) {
+        if (target.imguiSet && m_imguiInitialized) ImGui_ImplVulkan_RemoveTexture(target.imguiSet);
+        target.imguiSet = VK_NULL_HANDLE;
     }
-    if (m_hdrImage != VK_NULL_HANDLE) {
-        vmaDestroyImage(m_allocator, m_hdrImage, m_hdrImageAllocation);
-        m_hdrImage = VK_NULL_HANDLE;
-        m_hdrImageAllocation = nullptr;
+}
+
+void VulkanRenderer::RegisterViewportTextures()
+{
+    for (auto& target : m_viewportTargets) {
+        if (target.ldrView && !target.imguiSet)
+            target.imguiSet = ImGui_ImplVulkan_AddTexture(target.sampler, target.ldrView,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+}
+
+void VulkanRenderer::DestroyViewportTargets(ViewportTargets& targets)
+{
+    // 调用者保证 GPU 已结束使用；候选分配失败时从未提交，不需要再次 WaitIdle。
+    for (auto& target : targets) {
+        if (target.imguiSet && m_imguiInitialized) ImGui_ImplVulkan_RemoveTexture(target.imguiSet);
+        if (target.toneSet && m_descriptorPool)
+            vkFreeDescriptorSets(m_device, m_descriptorPool, 1, &target.toneSet);
+        if (target.framebuffer) vkDestroyFramebuffer(m_device, target.framebuffer, nullptr);
+        if (target.sampler) vkDestroySampler(m_device, target.sampler, nullptr);
+        if (target.ldrView) vkDestroyImageView(m_device, target.ldrView, nullptr);
+        if (target.hdrView) vkDestroyImageView(m_device, target.hdrView, nullptr);
+        if (target.depthView) vkDestroyImageView(m_device, target.depthView, nullptr);
+        if (target.ldr) vmaDestroyImage(m_allocator, target.ldr, target.ldrAllocation);
+        if (target.hdr) vmaDestroyImage(m_allocator, target.hdr, target.hdrAllocation);
+        if (target.depth) vmaDestroyImage(m_allocator, target.depth, target.depthAllocation);
+        target = {};
+    }
+}
+
+void VulkanRenderer::EnsureViewportTargets()
+{
+    if (!m_viewportRequest.visible || !m_viewportRequest.extent.Valid()) return;
+
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    const auto& limits = properties.limits;
+
+    const ViewportExtent wanted{
+        std::min(m_viewportRequest.extent.width, std::min({limits.maxImageDimension2D,
+            limits.maxFramebufferWidth, limits.maxViewportDimensions[0]})),
+        std::min(m_viewportRequest.extent.height, std::min({limits.maxImageDimension2D,
+            limits.maxFramebufferHeight, limits.maxViewportDimensions[1]}))};
+    if (wanted == m_viewportExtent) { 
+        m_failedViewportExtent = {}; 
+        m_viewportStatus.clear(); 
+        return; 
+    }
+    if (wanted == m_failedViewportExtent) return;
+
+    ViewportTargets candidate{};
+    ScopeExit rollback([&] { DestroyViewportTargets(candidate); });
+
+    try {
+        for (auto& target : candidate) {
+            CreateImage(wanted.width, wanted.height, 1, m_hdrFormat, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+                target.hdr, target.hdrAllocation);
+            target.hdrView = CreateImageView(target.hdr, m_hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+            const VkFormat depthFormat = FindDepthFormat();
+            CreateImage(wanted.width, wanted.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depthAllocation);
+            target.depthView = CreateImageView(target.depth, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+
+            CreateImage(wanted.width, wanted.height, 1, m_ldrFormat, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                target.ldr, target.ldrAllocation);
+            target.ldrView = CreateImageView(target.ldr, m_ldrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+            VkSamplerCreateInfo sampler{}; 
+            sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
+            sampler.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            if (vkCreateSampler(m_device, &sampler, nullptr, &target.sampler) != VK_SUCCESS)
+                throw std::runtime_error("failed to create viewport sampler");
+
+            const std::array<VkImageView, 3> views{target.ldrView, target.hdrView, target.depthView};
+
+            VkFramebufferCreateInfo framebuffer{}; framebuffer.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer.renderPass = m_renderPass; framebuffer.attachmentCount = uint32_t(views.size());
+            framebuffer.pAttachments = views.data(); framebuffer.width = wanted.width;
+            framebuffer.height = wanted.height; framebuffer.layers = 1;
+            if (vkCreateFramebuffer(m_device, &framebuffer, nullptr, &target.framebuffer) != VK_SUCCESS)
+                throw std::runtime_error("failed to create viewport framebuffer");
+
+            VkDescriptorSetAllocateInfo allocation{}; allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocation.descriptorPool = m_descriptorPool; allocation.descriptorSetCount = 1;
+            allocation.pSetLayouts = &m_toneMapDescriptorSetLayout;
+            if (vkAllocateDescriptorSets(m_device, &allocation, &target.toneSet) != VK_SUCCESS)
+                throw std::runtime_error("failed to allocate viewport tone-map descriptor");
+
+            VkDescriptorImageInfo hdr{}; hdr.imageView = target.hdrView;
+            hdr.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            VkWriteDescriptorSet write{}; write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = target.toneSet; write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; write.pImageInfo = &hdr;
+            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+            target.imguiSet = ImGui_ImplVulkan_AddTexture(target.sampler, target.ldrView,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            if (!target.imguiSet) throw std::runtime_error("failed to register viewport texture");
+        }
+        // 候选完全成功后才发布；所有旧槽位的 UI 采样完成后才能解除注册/销毁。
+        WaitIdle();
+        m_viewportTargets.swap(candidate);
+        m_viewportExtent = wanted;
+        m_failedViewportExtent = {}; m_viewportStatus.clear();
+    } catch (const std::exception& error) {
+        // 相同失败请求不会每帧重新分配；改尺寸后再尝试，旧目标继续等比例显示。
+        m_failedViewportExtent = wanted; m_viewportStatus = error.what();
     }
 }
 
@@ -1724,15 +1785,11 @@ void VulkanRenderer::CreateFramebuffers()
     m_swapChainFramebuffers.resize(m_swapChainImageViews.size());
 
     for (size_t i = 0; i < m_swapChainImageViews.size(); ++i) {
-        std::array<VkImageView, 3> attachments = {
-            m_swapChainImageViews[i],
-            m_hdrImageView,
-            m_depthImageView
-        };
+        std::array<VkImageView, 1> attachments = {m_swapChainImageViews[i]};
 
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = m_renderPass;
+        framebufferInfo.renderPass = m_uiRenderPass;
         framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
         framebufferInfo.pAttachments = attachments.data();
         framebufferInfo.width = m_swapChainExtent.width;
@@ -1748,7 +1805,7 @@ void VulkanRenderer::CreateFramebuffers()
 // ---------------------------------------------------------------------------
 // Recreating the swapchain
 //
-// 故意拆分成两个拆解步骤：仅调整大小会使交换链大小的资源失效，而格式更改则会使渲染通道和所有基于它构建的东西（包括ImGui后端）都失效。
+// 交换链重建只影响呈现 framebuffer/UI pass；离屏目标和场景管线独立于窗口大小/格式。
 // ---------------------------------------------------------------------------
 
 void VulkanRenderer::DestroySwapChainResources()
@@ -1759,18 +1816,6 @@ void VulkanRenderer::DestroySwapChainResources()
         vkDestroyFramebuffer(m_device, framebuffer, nullptr);
     }
     m_swapChainFramebuffers.clear();
-
-    if (m_depthImageView != VK_NULL_HANDLE) {
-        vkDestroyImageView(m_device, m_depthImageView, nullptr);
-        m_depthImageView = VK_NULL_HANDLE;
-    }
-    if (m_depthImage != VK_NULL_HANDLE) {
-        vmaDestroyImage(m_allocator, m_depthImage, m_depthImageAllocation);
-        m_depthImage = VK_NULL_HANDLE;
-        m_depthImageAllocation = nullptr;
-    }
-
-    DestroyHdrResources();
 
     for (const VkImageView imageView : m_swapChainImageViews) {
         vkDestroyImageView(m_device, imageView, nullptr);
@@ -1805,6 +1850,10 @@ void VulkanRenderer::DestroyPipelineResources()
     if (m_toneMapPipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(m_device, m_toneMapPipelineLayout, nullptr);
         m_toneMapPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_uiRenderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(m_device, m_uiRenderPass, nullptr);
+        m_uiRenderPass = VK_NULL_HANDLE;
     }
     if (m_renderPass != VK_NULL_HANDLE) {
         vkDestroyRenderPass(m_device, m_renderPass, nullptr);
@@ -2065,17 +2114,25 @@ void VulkanRenderer::DestroyTextureResources()
 
 VulkanRenderer::GpuTexture VulkanRenderer::UploadMaterialTexture(const Image& image)
 {
-    // Save default checkerboard state; reuse the same staging, mip and sampler path.
-    GpuTexture saved{m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler};
-    const uint32_t width=m_textureWidth,height=m_textureHeight,levels=m_textureMipLevels;
-    auto restore=[&] {m_textureImage=saved.image; m_textureImageAllocation=saved.allocation;
-        m_textureImageView=saved.view; m_textureSampler=saved.sampler;
-        m_textureWidth=width; m_textureHeight=height; m_textureMipLevels=levels;};
-    m_textureImage=VK_NULL_HANDLE; m_textureImageAllocation=nullptr;
-    m_textureImageView=VK_NULL_HANDLE; m_textureSampler=VK_NULL_HANDLE;
+    // 保存默认棋盘状态；重复使用相同的临时、mip 和采样器路径
+    GpuTexture saved{ m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler };
+    const uint32_t width = m_textureWidth, height = m_textureHeight, levels = m_textureMipLevels;
+    auto restore=[&] {
+        m_textureImage=saved.image; 
+        m_textureImageAllocation=saved.allocation;
+        m_textureImageView=saved.view; 
+        m_textureSampler=saved.sampler;
+        m_textureWidth=width; 
+        m_textureHeight=height; 
+        m_textureMipLevels=levels;
+    };
+    m_textureImage=VK_NULL_HANDLE; 
+    m_textureImageAllocation=nullptr;
+    m_textureImageView=VK_NULL_HANDLE; 
+    m_textureSampler=VK_NULL_HANDLE;
     try {
         UploadTexture(image);
-        GpuTexture result{m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler};
+        GpuTexture result{ m_textureImage,m_textureImageAllocation,m_textureImageView,m_textureSampler };
         restore(); return result;
     } catch (...) { DestroyTextureResources(); restore(); throw; }
 }
@@ -2092,37 +2149,50 @@ void VulkanRenderer::EnsureMaterialTexturesUploaded(const MaterialLibrary& mater
         m_materialTextures.push_back(UploadMaterialTexture(materials.GetTexture(i)));
     // 每个材质绑定自己的颜色/法线组合，共用颜色图不再共用错误的法线 binding。
     for (uint32_t i=0;i<materials.MaterialCount();++i) {
-        const auto& material=materials.GetMaterial(i);
+        const auto& material = materials.GetMaterial(i);
         std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight,m_descriptorSetLayout);
         std::vector<VkDescriptorSet> sets(kMaxFramesInFlight);
         VkDescriptorSetAllocateInfo ai{};
-        ai.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; ai.descriptorPool=m_descriptorPool;
-        ai.descriptorSetCount=kMaxFramesInFlight; ai.pSetLayouts=layouts.data();
+        ai.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; 
+        ai.descriptorPool=m_descriptorPool;
+        ai.descriptorSetCount=kMaxFramesInFlight; 
+        ai.pSetLayouts=layouts.data();
         if (vkAllocateDescriptorSets(m_device,&ai,sets.data())!=VK_SUCCESS)
             throw std::runtime_error("failed to allocate material descriptor sets");
+
         m_materialDescriptorSets.push_back(sets);
         for (uint32_t frame=0;frame<kMaxFramesInFlight;++frame) {
-            const auto& normal=material.normalTexture==UINT32_MAX ? m_flatNormalTexture : m_materialTextures.at(material.normalTexture);
-            VkDescriptorBufferInfo buffer{m_uniformBuffers[frame],0,sizeof(UniformBufferObject)};
-            VkDescriptorImageInfo base{m_textureSampler,m_textureImageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-            if (material.baseColorTexture!=UINT32_MAX) {
-                const auto& t=m_materialTextures.at(material.baseColorTexture);
-                base={t.sampler,t.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            const auto& normal = material.normalTexture == UINT32_MAX ? m_flatNormalTexture : m_materialTextures.at(material.normalTexture);
+            VkDescriptorBufferInfo buffer{ m_uniformBuffers[frame],0,sizeof(UniformBufferObject) };
+            VkDescriptorImageInfo base{ m_textureSampler,m_textureImageView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            if (material.baseColorTexture != UINT32_MAX) {
+                const auto& t = m_materialTextures.at(material.baseColorTexture);
+                base = { 
+                    t.sampler,
+                    t.view,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL 
+                };
             }
-            std::array<VkDescriptorImageInfo,3> images{{base,
+            std::array<VkDescriptorImageInfo, 3> images{ {base,
                 {m_shadowSampler,m_shadowImageViews[frame],VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
-                {normal.sampler,normal.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}}};
-            std::array<VkWriteDescriptorSet,4> writes{};
+                {normal.sampler,normal.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}} };
+            std::array<VkWriteDescriptorSet, 4> writes{};
             for (uint32_t k=0;k<4;++k) {
-                writes[k].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[k].dstSet=sets[frame];
-                writes[k].dstBinding=k; writes[k].descriptorCount=1;
-                writes[k].descriptorType=k==0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                if (k==0) writes[k].pBufferInfo=&buffer; else writes[k].pImageInfo=&images[k-1];
+                writes[k].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; 
+                writes[k].dstSet=sets[frame];
+                writes[k].dstBinding=k; 
+                writes[k].descriptorCount=1;
+                writes[k].descriptorType = k == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                if (k == 0) 
+                    writes[k].pBufferInfo = &buffer; 
+                else 
+                    writes[k].pImageInfo = &images[k - 1];
             }
             vkUpdateDescriptorSets(m_device,4,writes.data(),0,nullptr);
         }
     }
-    m_materialLibraryIdentity=materials.Identity(); m_materialLibraryRevision=materials.Revision();
+    m_materialLibraryIdentity=materials.Identity(); 
+    m_materialLibraryRevision=materials.Revision();
 }
 
 void VulkanRenderer::DestroyMaterialTextures()
@@ -2241,8 +2311,8 @@ void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex, const RenderSnapsh
 {
     UniformBufferObject ubo{};
     ubo.view = snapshot.camera.ViewMatrix();
-    const float aspect = static_cast<float>(m_swapChainExtent.width) /
-        static_cast<float>(m_swapChainExtent.height);
+    const float aspect = static_cast<float>(std::max(1u, m_viewportExtent.width)) /
+        static_cast<float>(std::max(1u, m_viewportExtent.height));
     ubo.proj = snapshot.camera.ProjectionMatrix(aspect);
     ubo.proj[1][1] *= -1.0f;
     ubo.cameraPosition = glm::vec4(snapshot.camera.position, 1.0f);
@@ -2255,7 +2325,7 @@ void VulkanRenderer::UpdateUniformBuffer(uint32_t frameIndex, const RenderSnapsh
         snapshot.environmentData && snapshot.environment.background ? 1.0f : 0.0f,
         float(m_uploadedEnvironment->prefiltered.mips.size() - 1));
     ubo.lightingTerms = glm::vec4(snapshot.lightingTerms, 0.0f);
-    ubo.framebufferSize = glm::vec4(m_swapChainExtent.width, m_swapChainExtent.height, 0, 0);
+    ubo.framebufferSize = glm::vec4(std::max(1u, m_viewportExtent.width), std::max(1u, m_viewportExtent.height), 0, 0);
     memcpy(m_uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
 
     // 和暂存上传一样的道理：一致性不再是分配请求所保证的，所以每次主机写入之后都会紧跟一次显式刷新。
@@ -2271,78 +2341,90 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         throw std::runtime_error("failed to begin recording command buffer!");
     }
 
-    RecordShadowPass(commandBuffer, snapshot);
+    if (m_viewportImage.Valid()) {
+        RecordShadowPass(commandBuffer, snapshot);
 
-    VkRenderPassBeginInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    renderPassInfo.renderPass = m_renderPass;
-    renderPassInfo.framebuffer = m_swapChainFramebuffers[imageIndex];
-    renderPassInfo.renderArea.offset = { 0, 0 };
-    renderPassInfo.renderArea.extent = m_swapChainExtent;
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = m_renderPass;
+        renderPassInfo.framebuffer = m_viewportTargets[m_currentFrame].framebuffer;
+        renderPassInfo.renderArea.offset = { 0, 0 };
+        renderPassInfo.renderArea.extent = VkExtent2D{m_viewportExtent.width, m_viewportExtent.height};
 
-    std::array<VkClearValue, 3> clearValues{};
-    clearValues[0].color = { {0.05f, 0.06f, 0.09f, 1.0f} };
-    clearValues[1].color = { {0.05f, 0.06f, 0.09f, 0.0f} };
-    clearValues[2].depthStencil = { 1.0f, 0 };
-    renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());;
-    renderPassInfo.pClearValues = clearValues.data();
+        std::array<VkClearValue, 3> clearValues{};
+        clearValues[0].color = { {0.05f, 0.06f, 0.09f, 1.0f} };
+        clearValues[1].color = { {0.05f, 0.06f, 0.09f, 0.0f} };
+        clearValues[2].depthStencil = { 1.0f, 0 };
+        renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());;
+        renderPassInfo.pClearValues = clearValues.data();
 
-    vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline);
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_swapChainExtent.width);
-    viewport.height = static_cast<float>(m_swapChainExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(m_viewportExtent.width);
+        viewport.height = static_cast<float>(m_viewportExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-    VkRect2D scissor{};
-    scissor.offset = { 0, 0 };
-    scissor.extent = m_swapChainExtent;
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = VkExtent2D{m_viewportExtent.width, m_viewportExtent.height};
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-        1, 1, &m_environmentSets[m_currentFrame], 0, nullptr);
-    for (const DrawItem& item : snapshot.drawItems) {
-        // meshIndex 是 MeshLibrary 的合法索引 —— 由构建场景那一侧用 k* 常量保证。
-        // 这里是坏句柄最终落地的地方：用 assert 而不是分支，debug 抓住、release 零成本。
-        assert(item.meshIndex < m_meshes.size() && "draw item references a mesh that was never uploaded");
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+            1, 1, &m_environmentSets[m_currentFrame], 0, nullptr);
+        for (const DrawItem& item : snapshot.drawItems) {
+            assert(item.meshIndex < m_meshes.size() && "draw item references a mesh that was never uploaded");
 
-        const GpuMesh& mesh = m_meshes[item.meshIndex];
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            item.mirrored ? m_mirroredPipeline : m_graphicsPipeline);
-        VkDescriptorSet descriptorSet = m_materialDescriptorSets.at(item.materialIndex)[m_currentFrame];
+            const GpuMesh& mesh = m_meshes[item.meshIndex];
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                item.mirrored ? m_mirroredPipeline : m_graphicsPipeline);
+            VkDescriptorSet descriptorSet = m_materialDescriptorSets.at(item.materialIndex)[m_currentFrame];
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+
+            const VkBuffer vertexBuffers[] = { mesh.vertexBuffer };
+            const VkDeviceSize offsets[] = { 0 };
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+            const PushConstants push{ item.worldTransform, glm::vec4(item.tint, 1.0f),
+                glm::vec4(item.metallicFactor, item.roughnessFactor, item.unlit ? 1.0f : 0.0f, item.normalScale), item.emissive,
+                glm::vec4(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
+                    float(snapshot.normalDebug), 0.0f, 0.0f) };
+            vkCmdPushConstants(commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(PushConstants), &push);
+
+            vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+        }
+
+        vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+            m_toneMapPipelineLayout, 0, 1, &m_viewportTargets[m_currentFrame].toneSet, 0, nullptr);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipelineLayout,
+            1, 1, &m_environmentSets[m_currentFrame], 0, nullptr);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
-        const VkBuffer vertexBuffers[] = { mesh.vertexBuffer };
-        const VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdEndRenderPass(commandBuffer);
+    } // LDR 最终为 SHADER_READ_ONLY；离屏 pass 的 external dependency 保障 UI 采样。
 
-        const PushConstants push{ item.worldTransform, glm::vec4(item.tint, 1.0f),
-            glm::vec4(item.metallicFactor, item.roughnessFactor, item.unlit ? 1.0f : 0.0f, item.normalScale), item.emissive,
-            glm::vec4(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
-                float(snapshot.normalDebug), 0.0f, 0.0f) };
-        vkCmdPushConstants(commandBuffer, m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(PushConstants), &push);
-
-        vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
-    }
-
-    vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-        m_toneMapPipelineLayout, 0, 1, &m_toneMapDescriptorSet, 0, nullptr);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipelineLayout,
-        1, 1, &m_environmentSets[m_currentFrame], 0, nullptr);
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-
+    VkRenderPassBeginInfo uiPass{};
+    uiPass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    uiPass.renderPass = m_uiRenderPass;
+    uiPass.framebuffer = m_swapChainFramebuffers[imageIndex];
+    uiPass.renderArea.extent = m_swapChainExtent;
+    VkClearValue uiClear{}; 
+    uiClear.color = {{0.025f, 0.025f, 0.03f, 1.0f}};
+    uiPass.clearValueCount = 1; 
+    uiPass.pClearValues = &uiClear;
+    vkCmdBeginRenderPass(commandBuffer, &uiPass, VK_SUBPASS_CONTENTS_INLINE);
     // UI 在 tone-map 合成之后绘制，保持 UI 颜色不受场景曝光曲线影响。
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
@@ -2366,6 +2448,8 @@ void VulkanRenderer::InitImGui()
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Image 不抢 ActiveId；窗口只能从标题栏移动，避免场景点击/操纵轴带动整个面板。
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplGlfw_InitForVulkan(m_window, true))
@@ -2403,8 +2487,8 @@ void VulkanRenderer::InitImGuiVulkanBackend()
     initInfo.Queue = m_graphicsQueue;
     initInfo.PipelineCache = VK_NULL_HANDLE;
     initInfo.DescriptorPool = m_imguiDescriptorPool;
-    initInfo.RenderPass = m_renderPass;
-    initInfo.Subpass = 1;
+    initInfo.RenderPass = m_uiRenderPass;
+    initInfo.Subpass = 0;
     initInfo.MinImageCount = m_minImageCount;
     initInfo.ImageCount = static_cast<uint32_t>(m_swapChainImages.size());
     initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
@@ -2429,6 +2513,7 @@ void VulkanRenderer::InitImGuiVulkanBackend()
 
 void VulkanRenderer::ShutdownImGui()
 {
+    UnregisterViewportTextures();
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_Shutdown();
         m_imguiInitialized = false;
@@ -2523,14 +2608,14 @@ VkFormat VulkanRenderer::FindDepthFormat() const
 void VulkanRenderer::CreateRenderPass()
 {
     std::array<VkAttachmentDescription, 3> attachments{};
-    attachments[0].format = m_swapChainImageFormat;
+    attachments[0].format = m_ldrFormat;
     attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     attachments[1].format = m_hdrFormat;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2552,7 +2637,7 @@ void VulkanRenderer::CreateRenderPass()
 
     VkAttachmentReference sceneColorRef{ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     VkAttachmentReference sceneDepthRef{ 2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
-    VkAttachmentReference swapColorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkAttachmentReference ldrColorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     VkAttachmentReference hdrInputRef{ 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     std::array<VkSubpassDescription, 2> subpasses{};
     subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -2561,7 +2646,7 @@ void VulkanRenderer::CreateRenderPass()
     subpasses[0].pDepthStencilAttachment = &sceneDepthRef;
     subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpasses[1].colorAttachmentCount = 1;
-    subpasses[1].pColorAttachments = &swapColorRef;
+    subpasses[1].pColorAttachments = &ldrColorRef;
     subpasses[1].inputAttachmentCount = 1;
     subpasses[1].pInputAttachments = &hdrInputRef;
 
@@ -2588,14 +2673,15 @@ void VulkanRenderer::CreateRenderPass()
     dependencies[2].dstSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependencies[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[2].dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    dependencies[2].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[2].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
-    // 交换链附件首次在 subpass 1 使用；其自动布局转换也必须等待 acquire。
+    // LDR 在 subpass 1 写入；复用前覆盖上次 UI 对此槽位的采样。
     dependencies[3].srcSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[3].dstSubpass = 1;
-    dependencies[3].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[3].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dependencies[3].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[3].srcAccessMask = 0;
+    dependencies[3].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
     dependencies[3].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo renderPassInfo{};
@@ -2610,6 +2696,29 @@ void VulkanRenderer::CreateRenderPass()
     if (vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
         throw std::runtime_error("failed to create render pass!");
     }
+}
+
+void VulkanRenderer::CreateUiRenderPass()
+{
+    VkAttachmentDescription color{};
+    color.format = m_swapChainImageFormat; color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &reference;
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL; dependency.dstSubpass = 0;
+    dependency.srcStageMask = dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo info{}; info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = 1; info.pAttachments = &color;
+    info.subpassCount = 1; info.pSubpasses = &subpass;
+    info.dependencyCount = 1; info.pDependencies = &dependency;
+    if (vkCreateRenderPass(m_device, &info, nullptr, &m_uiRenderPass) != VK_SUCCESS)
+        throw std::runtime_error("failed to create editor UI render pass");
 }
 
 void VulkanRenderer::UploadToDeviceLocal(const void* source, VkDeviceSize size,

@@ -52,6 +52,7 @@ InputState GlfwInput::Sample(const EditorInputCapture& capture)
     glfwGetCursorPos(m_window, &cursorX, &cursorY);
 
     const glm::vec2 cursorPosition(static_cast<float>(cursorX), static_cast<float>(cursorY));
+    input.cursorPosition = cursorPosition;
 
     if (input.lookActive && m_hasLastCursorPosition) {
         input.lookDelta = cursorPosition - m_lastCursorPosition;

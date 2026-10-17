@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -55,7 +55,7 @@ struct UniformBufferObject {
 	glm::mat4 inverseViewProjection;
 	glm::vec4 environment;
 	glm::vec4 lightingTerms;
-	glm::vec4 framebufferSize;
+	glm::vec4 framebufferSize; // 场景离屏像素尺寸；供 tone-map 的背景射线使用。
 };
 static_assert(offsetof(UniformBufferObject, environment) == 304 && sizeof(UniformBufferObject) == 352,
     "environment camera UBO must match std140 shader offsets");
@@ -88,6 +88,7 @@ public:
 	virtual void ConfigureWindowHints() const override;
 	virtual void Init(GLFWwindow* window) override;
 	virtual void Cleanup() override;
+	ViewportImage GetViewportImage() const override { return m_viewportImage; }
 	virtual void WaitIdle() override;
 	virtual void DrawFrame(const RenderSnapshot& snapshot,
 		const std::function<void()>& drawEditorUi) override;
@@ -106,12 +107,11 @@ private:
 	void CreateRenderFinishedSemaphores();
 	void DestroyRenderFinishedSemaphores();
 
-	// resources sized to the swapchain
+	// presentation resources; scene targets follow the independent viewport request
 	void CreateSwapChain();
 	void CreateImageViews();
-	void CreateDepthResources();
-	void CreateHdrResources();
-	void DestroyHdrResources();
+	void EnsureViewportTargets();
+	void CreateUiRenderPass();
 	void CreateRenderPass();
 	void CreateGraphicsPipeline();
 	void CreateToneMapPipeline();
@@ -129,7 +129,7 @@ private:
 	// ----------------------------------------
 
 	void CreateDescriptorSetLayout();
-	void CreateToneMapDescriptorSet();
+	void CreateToneMapDescriptorSetLayout();
 	void CreateUniformBuffers();
 	void CreateDescriptorPool();
 	void CreateDescriptorSets();
@@ -222,20 +222,33 @@ private:
 
 	VmaAllocator m_allocator = nullptr;
 
-	VkImage m_depthImage = VK_NULL_HANDLE;
-	VmaAllocation m_depthImageAllocation = nullptr;
-	VkImageView m_depthImageView = VK_NULL_HANDLE;
-	VkImage m_hdrImage = VK_NULL_HANDLE;
-	VmaAllocation m_hdrImageAllocation = nullptr;
-	VkImageView m_hdrImageView = VK_NULL_HANDLE;
-	VkFormat m_hdrFormat = VK_FORMAT_UNDEFINED;
+    // 离屏渲染所需
+    struct ViewportTarget
+    {
+        VkImage hdr = VK_NULL_HANDLE, depth = VK_NULL_HANDLE, ldr = VK_NULL_HANDLE;
+        VmaAllocation hdrAllocation = nullptr, depthAllocation = nullptr, ldrAllocation = nullptr;
+        VkImageView hdrView = VK_NULL_HANDLE, depthView = VK_NULL_HANDLE, ldrView = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VkDescriptorSet toneSet = VK_NULL_HANDLE, imguiSet = VK_NULL_HANDLE;
+    };
+    using ViewportTargets = std::array<ViewportTarget, kMaxFramesInFlight>;
+    void DestroyViewportTargets(ViewportTargets& targets);
+    void RegisterViewportTextures();
+    void UnregisterViewportTextures();
+    ViewportTargets m_viewportTargets{};
+    ViewportExtent m_viewportExtent{}, m_failedViewportExtent{};
+    ViewportImage m_viewportImage;
+    std::string m_viewportStatus;
+    VkFormat m_hdrFormat = VK_FORMAT_UNDEFINED;
+    VkFormat m_ldrFormat = VK_FORMAT_R8G8B8A8_SRGB;
+    VkRenderPass m_uiRenderPass = VK_NULL_HANDLE;
 
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
     VkPipeline m_mirroredPipeline = VK_NULL_HANDLE;
 	VkDescriptorSetLayout m_toneMapDescriptorSetLayout = VK_NULL_HANDLE;
-	VkDescriptorSet m_toneMapDescriptorSet = VK_NULL_HANDLE;
 	VkPipelineLayout m_toneMapPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_toneMapPipeline = VK_NULL_HANDLE;
 	std::array<VkImage, kMaxFramesInFlight> m_shadowImages{};

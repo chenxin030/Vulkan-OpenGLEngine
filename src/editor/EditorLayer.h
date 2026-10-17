@@ -11,6 +11,7 @@ class EditorLayer : public Layer
 public:
     void OnAttach() override;
     void OnDetach() noexcept override;
+    void OnEvent(Event& event) override;
     void OnUpdate(FrameContext& frame) override;
     void OnImGuiRender(const FrameContext& frame) override;
     void OnFrameEnd() override;

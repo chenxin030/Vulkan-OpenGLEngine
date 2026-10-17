@@ -34,6 +34,7 @@ public:
     void Init(GLFWwindow* window) override;
     void DrawFrame(const RenderSnapshot& snapshot,
         const std::function<void()>& drawEditorUi) override;
+    ViewportImage GetViewportImage() const override { return m_viewportImage; }
     void WaitIdle() override;
     void Cleanup() override;
 
@@ -120,6 +121,10 @@ private:
     GLint m_shadowLightViewProjectionLocation = -1;
     GLint m_shadowSamplerLocation = -1;
 
+    std::string m_viewportStatus;
+    ViewportImage m_viewportImage;
+    ViewportExtent m_failedViewportExtent;
+    GLuint m_ldrFramebuffer = 0, m_ldrColorTexture = 0;
     GLuint m_hdrFramebuffer = 0;
     GLuint m_hdrColorTexture = 0;
     GLuint m_hdrDepthTexture = 0;

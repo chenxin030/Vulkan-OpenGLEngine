@@ -22,9 +22,11 @@ Layer& LayerStack::PushOverlay(std::unique_ptr<Layer> layer) { return Push(std::
 
 Layer& LayerStack::Push(std::unique_ptr<Layer> layer, bool overlay)
 {
-    if (m_sealed || m_traversing) throw std::logic_error("Install layers before Application::Run");
+    if (m_sealed || m_traversing) 
+        throw std::logic_error("Install layers before Application::Run");
 
-    if (!layer) throw std::invalid_argument("Cannot install a null layer");
+    if (!layer) 
+        throw std::invalid_argument("Cannot install a null layer");
 
     // 先保证容器分配成功，再取得层资源。失败时该层清理，之前成功挂接的层仍由栈拥有。
     m_layers.reserve(m_layers.size() + 1);
@@ -74,20 +76,26 @@ EditorInputCapture LayerStack::InputCapture() const
     return combined;
 }
 
-void LayerStack::RunFrame(Renderer& renderer, FrameContext& frame)
+void LayerStack::RunFrame(Renderer& renderer, FrameContext& frameContext)
 {
     TraversalGuard guard(m_traversing);
     try {
-        for (auto& layer : m_layers) layer->OnUpdate(frame);
-        if (!frame.m_snapshot) throw std::logic_error("A scene layer must submit a snapshot");
+        for (auto& layer : m_layers) layer->OnUpdate(frameContext);
+
+        if (!frameContext.m_snapshot) throw std::logic_error("A scene layer must submit a snapshot");
+
         // DrawFrame 后同步执行这个回调；允许因为 resize/out-of-date 跳帧而不调用。
-        renderer.DrawFrame(*frame.m_snapshot, [&] {
-            for (auto& layer : m_layers) layer->OnImGuiRender(frame);
+        renderer.SetViewportRequest(frameContext.viewportRequest);
+        frameContext.renderCamera = frameContext.m_snapshot->camera;
+
+        renderer.DrawFrame(*frameContext.m_snapshot, [&] {
+            frameContext.viewportImage = renderer.GetViewportImage();
+            for (auto& layer : m_layers) layer->OnImGuiRender(frameContext);
         });
     } catch (...) {
-        frame.m_snapshot.reset();
+        frameContext.m_snapshot.reset();
         throw;
     }
-    frame.m_snapshot.reset();
+    frameContext.m_snapshot.reset();
     for (auto& layer : m_layers) layer->OnFrameEnd();
 }

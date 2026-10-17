@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "platform/InputState.h"
+#include "rhi/Viewport.h"
 #include "scene/RenderSnapshot.h"
 #include <optional>
 #include <stdexcept>
@@ -15,6 +16,9 @@ public:
     float deltaSeconds = 0;
     InputState input;
     glm::vec2 framebufferSize{0};
+    ViewportRequest viewportRequest;
+    ViewportImage viewportImage; // UI 回调前由 Renderer 提供；不跨帧缓存句柄。
+    Camera renderCamera; // 与当前快照一致，拾取/操纵轴不读取稍后 UI 编辑的相机。
 
     void Submit(RenderSnapshot snapshot)
     {
