@@ -39,6 +39,11 @@ public:
     void Cleanup() override;
 
 private:
+    struct TimingSlot { std::array<GLuint,5> queries{}; uint64_t frame = 0; bool pending = false; };
+    std::array<TimingSlot,8> m_timings{};
+    TimingSlot* m_timing = nullptr;
+    void BeginTiming();
+    void Timestamp(uint32_t marker);
     // 每个网格一个顶点数组对象。
     // VAO 是没有 Vulkan 对应部分的：核心配置的 OpenGL 要求属性布局记录到绑定的 VAO 中，而 Vulkan 则在管线对象中声明它。
     struct GlMesh

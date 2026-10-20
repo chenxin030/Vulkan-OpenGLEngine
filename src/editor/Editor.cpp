@@ -6,6 +6,7 @@
 #include "scene/SceneSerializer.h"
 #include "scene/ModelImporter.h"
 #include "scene/RenderSnapshot.h"
+#include "platform/FileDialogs.h"
 
 #include <imgui.h>
 #include <ImGuizmo.h>
@@ -36,22 +37,17 @@ std::filesystem::path ResolveEditorPath(const char* text)
     return (std::filesystem::path(PROJECT_ROOT) / input).lexically_normal();
 }
 
-std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVec2& displaySize,
-    bool playing, bool& hovered, bool& focused, bool& cameraGesture, ViewportRect& rect,
+std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool playing,
+    bool& hovered, bool& focused, bool& cameraGesture, ViewportRect& rect,
     ViewportRequest& request, const ViewportImage& image, const Camera& renderCamera,
-    int& operation, bool& local, bool& gizmoCaptured)
+    int& operation, bool& local, bool& gizmoCaptured, ViewportRect& previousRect, bool& modified)
 {
-    const float left = 360.0f;
-    const float right = std::max(left + 160.0f, displaySize.x - 270.0f);
-    const float top = 8.0f;
-    const float bottom = std::max(top + 100.0f, displaySize.y - 8.0f);
-
-    ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(right - left, bottom - top), ImGuiCond_FirstUseEver);
     hovered = false; focused = false; gizmoCaptured = false;
-    if (!ImGui::Begin("Scene View", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+    if (!ImGui::Begin("Scene View")) {
         request.visible = false; rect = {}; cameraGesture = false;
+        ImGuizmo::PushID("Scene transform");
         ImGuizmo::Enable(false);
+        ImGuizmo::PopID();
         ImGui::End(); return {};
     }
     ImGui::Text("Target: %u x %u pixels", image.extent.width, image.extent.height);
@@ -86,8 +82,20 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
     rect = FitViewport({origin.x, origin.y}, {available.x, available.y}, image.extent,
         {framebufferScale.x, framebufferScale.y});
     if (!request.visible || !image.Valid() || rect.size.x <= 0 || rect.size.y <= 0) {
-        cameraGesture = false; ImGuizmo::Enable(false);
+        rect = {}; cameraGesture = false;
+        ImGuizmo::PushID("Scene transform");
+        ImGuizmo::Enable(false);
+        ImGuizmo::PopID();
         ImGui::End(); return {};
+    }
+    // Dock/resize 改变坐标时停止旧手势；不能用旧 Image 上开始的拖动修改新布局。
+    const bool geometryChanged = rect.min != previousRect.min || rect.size != previousRect.size;
+    previousRect = rect;
+    if (geometryChanged) {
+        cameraGesture = false;
+        ImGuizmo::PushID("Scene transform");
+        ImGuizmo::Enable(false);
+        ImGuizmo::PopID();
     }
     ImGui::SetCursorScreenPos(ImVec2(rect.min.x, rect.min.y));
     // Image 和 Dummy 一样不抢 ActiveId，因此可同时作为拖放目标及操纵轴背景。
@@ -102,13 +110,17 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
             ImGui::GetDragDropPayload() == nullptr;
     if (!hovered || !focused || !ImGui::IsMouseDown(ImGuiMouseButton_Right)) cameraGesture = false;
     const float aspect = image.extent.Aspect();
-    std::optional<std::string> requested;
+    std::optional<ProjectAssetEntry> requested;
     if (!playing && ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MODEL_ASSET")) {
-            const char* id = static_cast<const char*>(payload->Data);
-            if (payload->DataSize > 1 && payload->DataSize <= 129 &&
-                id[payload->DataSize - 1] == '\0' &&
-                std::strlen(id) == static_cast<size_t>(payload->DataSize - 1)) requested = id;
+        for (const auto kind : {ProjectAssetKind::Model, ProjectAssetKind::Scene}) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                kind == ProjectAssetKind::Model ? "PROJECT_MODEL" : "PROJECT_SCENE")) {
+                const char* path = static_cast<const char*>(payload->Data);
+                if (payload->DataSize > 1 && payload->DataSize <= 32768 &&
+                    path[payload->DataSize - 1] == '\0' &&
+                    std::strlen(path) == static_cast<size_t>(payload->DataSize - 1))
+                    requested = ProjectAssetEntry{AssetPathFromUtf8(path), kind};
+            }
         }
         ImGui::EndDragDropTarget();
     }
@@ -143,7 +155,10 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
         drawList->PushClipRect(min, max, true);
         if (ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(projection), ops[operation],
             local || operation == 2 ? ImGuizmo::LOCAL : ImGuizmo::WORLD, glm::value_ptr(candidate))) {
-            if (EditorGeometry::Decompose(candidate)) transform->local = candidate;
+            if (EditorGeometry::Decompose(candidate) && candidate != transform->local) {
+                transform->local = candidate;
+                modified = true;
+            }
         }
         drawList->PopClipRect();
         // 使用当前操作的即时命中，不能用 IsOver() 的上一帧缓存判定本次选择。
@@ -163,14 +178,20 @@ std::optional<std::string> DrawViewport(Editor& editor, Scene& scene, const ImVe
     return requested;
 }
 
-void DrawHierarchy(Editor& editor, const Scene& scene)
+void DrawHierarchy(Editor& editor, const Scene& scene, bool playing,
+    bool& createEmpty, bool& createSprite, bool& deleteEntity)
 {
-    const float availableHeight = std::max(80.0f, ImGui::GetIO().DisplaySize.y - 410.0f);
-    ImGui::SetNextWindowPos(ImVec2(12.0f, 210.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(240.0f, availableHeight), ImGuiCond_Always);
-    ImGui::Begin("Scene Hierarchy");
+    if (!ImGui::Begin("Scene Hierarchy")) { ImGui::End(); return; }
+    ImGui::BeginDisabled(playing);
+    if (ImGui::Button("Create")) ImGui::OpenPopup("CreateEntity");
+    if (ImGui::BeginPopup("CreateEntity")) {
+        if (ImGui::MenuItem("Empty Entity")) createEmpty = true;
+        if (ImGui::MenuItem("Sprite")) createSprite = true;
+        ImGui::EndPopup();
+    }
+    ImGui::EndDisabled();
 
-    scene.registry.ForEachEntity([&editor, &scene](Entity entity) {
+    scene.registry.ForEachEntity([&editor, &scene, playing, &deleteEntity](Entity entity) {
         ImGui::PushID(static_cast<int>(entity.index));
         ImGui::PushID(static_cast<int>(entity.generation));
 
@@ -187,6 +208,13 @@ void DrawHierarchy(Editor& editor, const Scene& scene)
             editor.Select(entity);
         }
 
+        if (ImGui::BeginPopupContextItem("EntityActions")) {
+            editor.Select(entity);
+            ImGui::BeginDisabled(playing);
+            if (ImGui::MenuItem("Delete")) deleteEntity = true;
+            ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
         ImGui::PopID();
         ImGui::PopID();
     });
@@ -194,39 +222,8 @@ void DrawHierarchy(Editor& editor, const Scene& scene)
     ImGui::End();
 }
 
-std::optional<std::string> DrawModelAssets(const Scene& scene, bool playing)
-{
-    const float top = std::max(300.0f, ImGui::GetIO().DisplaySize.y - 190.0f);
-    ImGui::SetNextWindowPos(ImVec2(12.0f, top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(330.0f, std::max(100.0f,
-        ImGui::GetIO().DisplaySize.y - top - 8.0f)), ImGuiCond_Always);
-    ImGui::Begin("Model Assets");
-    std::optional<std::string> requested;
-    if (scene.modelAssets.empty()) ImGui::TextWrapped("Import a model to add it here.");
-    for (uint32_t i = 0; i < scene.modelAssets.size(); ++i) {
-        ImGui::PushID(scene.modelAssets[i].id.c_str());
-        ImGui::BeginDisabled(playing);
-        if (ImGui::Button("Add Instance")) requested = scene.modelAssets[i].id;
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        const std::string& path = scene.modelAssets[i].sourcePath;
-        const size_t separator = path.find_last_of("/\\");
-        ImGui::Selectable(path.c_str() + (separator == std::string::npos ? 0 : separator + 1));
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
-        if (!playing && ImGui::BeginDragDropSource()) {
-            const std::string& id = scene.modelAssets[i].id;
-            ImGui::SetDragDropPayload("MODEL_ASSET", id.c_str(), id.size() + 1);
-            ImGui::TextUnformatted("Add model instance at the origin");
-            ImGui::EndDragDropSource();
-        }
-        ImGui::PopID();
-    }
-    ImGui::End();
-    return requested;
-}
-
 void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
-    bool& load, bool& clear, bool& demo)
+    bool& load, bool& clear, bool& demo, bool& modified)
 {
     ImGui::SeparatorText("Environment");
     ImGui::BeginDisabled(playing);
@@ -236,10 +233,10 @@ void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
     if (ImGui::Button("Clear")) clear = true;
     if (ImGui::Button("IBL demo")) demo = true;
     ImGui::BeginDisabled(!scene.environmentData);
-    ImGui::Checkbox("IBL", &scene.environment.enabled);
-    ImGui::Checkbox("Skybox", &scene.environment.background);
-    ImGui::DragFloat("Intensity", &scene.environment.intensity, 0.02f, 0.0f, 10000.0f,
-        "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::Checkbox("IBL", &scene.environment.enabled)) modified = true;
+    if (ImGui::Checkbox("Skybox", &scene.environment.background)) modified = true;
+    if (ImGui::DragFloat("Intensity", &scene.environment.intensity, 0.02f, 0.0f, 10000.0f,
+        "%.2f", ImGuiSliderFlags_AlwaysClamp)) modified = true;
     ImGui::EndDisabled();
     ImGui::Checkbox("Direct light", &scene.directLighting);
     ImGui::Checkbox("Diffuse IBL", &scene.diffuseIbl);
@@ -251,19 +248,14 @@ void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
 }
 
 void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_t pathSize,
-    bool& load, bool& clear, bool& demo)
+    bool& load, bool& clear, bool& demo, bool& modified)
 {
-    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(std::max(12.0f, displaySize.x - 258.0f), 12.0f),
-        ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(246.0f, std::max(180.0f, displaySize.y - 24.0f)),
-        ImGuiCond_Always);
     ImGui::Begin("Inspector");
 
     const Entity selected = editor.SelectedEntity();
     if (!editor.HasSelection() || !scene.registry.IsAlive(selected)) {
         ImGui::TextUnformatted("Select an entity.");
-        DrawEnvironment(scene, playing, path, pathSize, load, clear, demo);
+        DrawEnvironment(scene, playing, path, pathSize, load, clear, demo, modified);
         ImGui::End();
         return;
     }
@@ -293,7 +285,9 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
                         candidate[axis] *= value->scale[axis] / glm::length(glm::vec3(candidate[axis]));
                 }
                 candidate[3] = glm::vec4(value->position, 1.0f);
-                if (EditorGeometry::Decompose(candidate)) transform->local = candidate;
+                if (EditorGeometry::Decompose(candidate) && candidate != transform->local) {
+                    transform->local = candidate; modified = true;
+                }
             }
         } else {
             ImGui::TextWrapped("Read-only: shear, reflection, degenerate or unsupported TRS. Original matrix preserved.");
@@ -307,7 +301,7 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
 
     if (SpriteRenderer* sprite = scene.registry.TryGet<SpriteRenderer>(selected)) {
         ImGui::SeparatorText("Sprite Renderer");
-        if (!playing) ImGui::ColorEdit3("Tint", &sprite->tint.x);
+        if (!playing) { if (ImGui::ColorEdit3("Tint", &sprite->tint.x)) modified = true; }
         else ImGui::Text("Tint: %.2f, %.2f, %.2f", sprite->tint.x, sprite->tint.y, sprite->tint.z);
     }
 
@@ -322,125 +316,253 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
         ImGui::Text("Speed: %.2f rad/s", bob->speed);
     }
 
-    DrawEnvironment(scene, playing, path, pathSize, load, clear, demo);
+    DrawEnvironment(scene, playing, path, pathSize, load, clear, demo, modified);
     ImGui::End();
 }
 
 } // namespace
 
+void Editor::InitializeLayout()
+{
+    m_layout.Initialize(std::filesystem::path(u8"" EDITOR_LAYOUT_PATH));
+    m_assets.Initialize(std::filesystem::path(u8"" ASSET_DIR));
+}
+
+void Editor::DrawMenu(bool playing)
+{
+    if (!ImGui::BeginMainMenuBar()) return;
+    if (ImGui::BeginMenu("File")) {
+        ImGui::BeginDisabled(playing || m_document.HasPending() || !m_importSource.empty());
+        if (ImGui::MenuItem("New Scene")) m_fileCommand = FileCommand::New;
+        if (ImGui::MenuItem("Open Scene...")) m_fileCommand = FileCommand::Open;
+        ImGui::Separator();
+        if (ImGui::MenuItem("Save")) m_fileCommand = FileCommand::Save;
+        if (ImGui::MenuItem("Save As...")) m_fileCommand = FileCommand::SaveAs;
+        ImGui::EndDisabled();
+        ImGui::EndMenu();
+    }
+    m_layout.DrawMenu();
+    ImGui::BeginDisabled(m_document.HasPending() || !m_importSource.empty() || m_fileCommand != FileCommand::None);
+    if (ImGui::Button(playing ? "Stop" : "Play")) {
+        if (playing) m_requestStop = true;
+        else m_requestPlay = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::Text("%s%s", m_document.Path().empty() ? "Untitled" : AssetPathUtf8(m_document.Path().filename()).c_str(),
+        m_document.Dirty() ? " *" : "");
+    if (!m_status.empty()) {
+        ImGui::TextDisabled("| %s", m_status.c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m_status.c_str());
+    }
+    ImGui::EndMainMenuBar();
+}
+
+void Editor::DrawDocumentDialogs()
+{
+    if (m_document.NeedsConfirmation() && !ImGui::IsPopupOpen("Unsaved Scene"))
+        ImGui::OpenPopup("Unsaved Scene");
+    if (ImGui::BeginPopupModal("Unsaved Scene", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Save changes before opening or creating a scene?");
+        if (ImGui::Button("Save")) { m_document.Decide(SceneDecision::Save); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Don't Save")) { m_document.Decide(SceneDecision::Discard); ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { m_document.Decide(SceneDecision::Cancel); ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    if (m_openImportPopup) { ImGui::OpenPopup("Import Model"); m_openImportPopup = false; }
+    if (ImGui::BeginPopupModal("Import Model", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Source: %s", AssetPathUtf8(m_importSource.filename()).c_str());
+        ImGui::InputText("Model folder", m_importName, sizeof(m_importName));
+        bool available = false;
+        try { available = m_assets.ImportNameAvailable(m_importName); }
+        catch (const std::exception& error) { m_status = error.what(); }
+        ImGui::TextUnformatted("Copy model and dependencies into assets/models/<folder>.");
+        if (!available) ImGui::TextUnformatted("Name exists or is invalid. Choose a different name, or Cancel.");
+        ImGui::BeginDisabled(!available);
+        if (ImGui::Button("Import")) { m_requestImport = true; ImGui::CloseCurrentPopup(); }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { m_importSource.clear(); ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+}
+
 void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const Camera& renderCamera)
 {
     ImGuizmo::BeginFrame();
-    if (!scene.registry.IsAlive(m_selectedEntity)) {
-        m_hasSelection = false;
+    // 原生对话框的 Enter/Escape 不能泄漏成应用快捷键；至少经过一次新的 ImGui 输入帧。
+    if (m_nativeInputGuard) {
+        bool held = false;
+        for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; ++key)
+            held |= ImGui::IsKeyDown(static_cast<ImGuiKey>(key));
+        for (int button = 0; button < 5; ++button) held |= ImGui::IsMouseDown(button);
+        if (!held) m_nativeInputGuard = false;
     }
-
-    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(330.0f, 184.0f), ImGuiCond_Always);
-    ImGui::Begin("Scene");
-    ImGui::InputText("File", m_scenePath, sizeof(m_scenePath));
-    ImGui::InputText("Model", m_modelPath, sizeof(m_modelPath));
-    ImGui::BeginDisabled(playing);
-    if (ImGui::Button("New Sprite")) m_requestCreate = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Delete")) m_requestDelete = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Save")) m_requestSave = true;
-    ImGui::SameLine();
-    if (ImGui::Button("Load")) m_requestLoad = true;
-    if (ImGui::Button("Import glTF / GLB")) m_requestImport = true;
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (playing) {
-        if (ImGui::Button("Stop")) m_requestStop = true;
-    } else if (ImGui::Button("Play")) m_requestPlay = true;
-    if (!m_status.empty()) ImGui::TextWrapped("%s", m_status.c_str());
-    ImGui::End();
-    if (const auto requested = DrawViewport(*this, scene, displaySize, playing, m_viewportHovered,
+    if (!scene.registry.IsAlive(m_selectedEntity)) m_hasSelection = false;
+    DrawMenu(playing);
+    if (m_layout.DrawDockSpace()) {
+        CancelViewportInput();
+        ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+    }
+    bool modified = false;
+    if (const auto dropped = DrawViewport(*this, scene, playing, m_viewportHovered,
         m_viewportFocused, m_cameraGesture, m_viewportRect, m_viewportRequest, image, renderCamera,
-        m_gizmoOperation, m_gizmoLocal, m_gizmoCaptured))
-        m_requestInstance = requested;
-    DrawHierarchy(*this, scene);
-    if (const auto requested = DrawModelAssets(scene, playing)) m_requestInstance = requested;
+        m_gizmoOperation, m_gizmoLocal, m_gizmoCaptured, m_previousViewportRect, modified)) {
+        if (dropped->kind == ProjectAssetKind::Model) m_requestInstance = dropped->relativePath;
+        else {
+            try { m_document.RequestOpen(m_assets.Resolve(dropped->relativePath, ProjectAssetKind::Scene)); }
+            catch (const std::exception& error) { m_status = error.what(); }
+        }
+    }
+    DrawHierarchy(*this, scene, playing, m_requestCreateEmpty, m_requestCreate, m_requestDelete);
+    const auto actions = m_assetBrowser.Draw(m_assets, playing);
+    m_requestPickImport |= actions.importModel;
+    m_requestRefresh |= actions.refresh;
+    if (actions.openScene) {
+        try { m_document.RequestOpen(m_assets.Resolve(*actions.openScene, ProjectAssetKind::Scene)); }
+        catch (const std::exception& error) { m_status = error.what(); }
+    }
     DrawInspector(*this, scene, playing, m_environmentPath, sizeof(m_environmentPath),
-        m_requestEnvironment, m_requestClearEnvironment, m_requestIblDemo);
+        m_requestEnvironment, m_requestClearEnvironment, m_requestIblDemo, modified);
+    if (modified && !playing) m_document.MarkModified();
+    DrawDocumentDialogs();
+}
+
+void Editor::BeforeFileDialog()
+{
+    CancelViewportInput();
+    ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+    m_pauseAfterDialog = true;
+    m_nativeInputGuard = true;
+}
+std::optional<std::filesystem::path> Editor::ChooseSavePath()
+{
+    const auto directory = m_document.Path().empty() ? m_assets.Root() / "scenes" : m_document.Path().parent_path();
+    if (!IsAssetPathWithin(directory, m_assets.Root())) throw std::runtime_error("Scene directory is outside assets");
+    std::filesystem::create_directories(directory);
+    BeforeFileDialog();
+    return FileDialogs::SaveScene(directory, m_document.Path().empty() ? std::filesystem::path("Untitled.scene.json") : m_document.Path().filename());
+}
+void Editor::RefreshAssets()
+{
+    try { m_assets.Refresh(); }
+    catch (const std::exception& error) { m_status = std::string("Assets refresh failed: ") + error.what(); }
+}
+void Editor::SceneChanged(const Scene& scene)
+{
+    m_hasSelection = false;
+    // 旧流程：资产 ID 属于原 Scene，换场景后清除旧请求。现在传项目路径，仍取消旧操作。
+    m_requestInstance.reset();
+    m_sceneChanged = true;
+    m_pauseAfterDialog = true; // 新场景不推进同步加载期间的墙钟时间。
+    CancelViewportInput();
+    ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+    std::snprintf(m_environmentPath, sizeof(m_environmentPath), "%s", scene.environment.sourcePath.c_str());
+    if (!m_document.Path().empty()) m_assetBrowser.Reveal(m_assets, m_document.Path());
 }
 
 void Editor::ApplyPending(Scene& editScene, std::optional<Scene>& runtimeScene)
 {
     try {
-        if (m_requestPlay && !runtimeScene) runtimeScene.emplace(editScene);
         if (m_requestStop) runtimeScene.reset();
-        if (m_requestCreate && !runtimeScene) {
-            Entity entity = editScene.registry.Create();
-            Transform transform;
-            transform.local = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
-            transform.world = transform.local;
-            editScene.registry.Add<Transform>(entity, transform);
-            editScene.registry.Add<SpriteRenderer>(entity);
-            Select(entity);
+        if (m_requestRefresh) { m_status = "Assets refreshed"; RefreshAssets(); }
+        if (!runtimeScene) {
+            if (m_requestCreate || m_requestCreateEmpty) {
+                Entity entity = editScene.registry.Create();
+                Transform transform;
+                transform.local = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
+                transform.world = transform.local;
+                editScene.registry.Add<Transform>(entity, transform);
+                editScene.registry.Add<Name>(entity, Name{m_requestCreate ? "Sprite" : "Entity"});
+                if (m_requestCreate) editScene.registry.Add<SpriteRenderer>(entity);
+                Select(entity); m_document.MarkModified();
+                m_status = m_requestCreate ? "Sprite created" : "Entity created";
+            }
+            if (m_requestDelete && m_hasSelection && editScene.registry.IsAlive(m_selectedEntity)) {
+                editScene.DestroyEntitySubtree(m_selectedEntity);
+                m_hasSelection = false; m_document.MarkModified(); m_status = "Entity deleted";
+            }
+            if (m_requestEnvironment) {
+                const auto source = ResolveEditorPath(m_environmentPath);
+                // 先读/烘焙完整候选数据，成功后才替换。失败不污染现有 Scene。
+                const auto loaded = LoadEnvironment(source);
+                const auto encoded = source.generic_u8string();
+                editScene.environment.sourcePath.assign(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+                editScene.environmentData = loaded.data;
+                editScene.environment.enabled = true; editScene.environment.background = true;
+                m_document.MarkModified(); m_status = "Environment loaded";
+            }
+            if (m_requestClearEnvironment) {
+                const bool changed = !editScene.environment.sourcePath.empty() || editScene.environment.enabled ||
+                    editScene.environment.background || editScene.environment.intensity != 1.0f;
+                editScene.environment = {}; editScene.environmentData.reset();
+                if (changed) m_document.MarkModified();
+                m_status = "Environment cleared";
+            }
+            if (m_requestInstance) {
+                m_pauseAfterDialog = true;
+                const auto path = m_assets.Resolve(*m_requestInstance, ProjectAssetKind::Model);
+                // 原基础上新增 Import 内容：仅模型拖放创建实例，Import 按钮不修改场景。
+                Scene candidate(editScene);
+                const auto roots = ModelImporter::InstantiateAsset(candidate, ModelImporter::LoadAsset(candidate, path));
+                editScene = std::move(candidate);
+                if (!roots.empty()) Select(roots.front());
+                m_document.MarkModified(); m_status = "Model instance created";
+            }
+            if (m_requestPickImport) {
+                BeforeFileDialog();
+                if (const auto source = FileDialogs::OpenModel(m_assets.Root())) {
+                    m_importSource = *source;
+                    const auto name = AssetPathUtf8(source->stem());
+                    std::snprintf(m_importName, sizeof(m_importName), "%s", name.c_str());
+                    m_openImportPopup = true;
+                }
+            }
+            if (m_requestImport && !m_importSource.empty()) {
+                m_pauseAfterDialog = true;
+                // 成功后只刷新项目资源，不向 editScene 追加资源或实体。
+                const auto imported = m_assets.ImportModel(m_importSource, m_importName);
+                m_importSource.clear();
+                m_status = "Model imported into project";
+                RefreshAssets(); m_assetBrowser.Reveal(m_assets, imported);
+            }
+            if (m_requestIblDemo) m_document.RequestOpen(m_assets.Root() / "phase8-ibl.scene.json");
+            if (m_fileCommand == FileCommand::New) m_document.RequestNew();
+            if (m_fileCommand == FileCommand::Open) {
+                BeforeFileDialog();
+                if (const auto path = FileDialogs::OpenScene(m_assets.Root()))
+                    m_document.RequestOpen(m_assets.Resolve(*path, ProjectAssetKind::Scene));
+            }
+            if (m_fileCommand == FileCommand::Save || m_fileCommand == FileCommand::SaveAs) {
+                const auto path = m_fileCommand == FileCommand::SaveAs || m_document.Path().empty()
+                    ? ChooseSavePath() : std::optional(m_document.Path());
+                if (m_document.Save(editScene, m_assets, path)) {
+                    m_status = "Scene saved"; RefreshAssets(); m_assetBrowser.Reveal(m_assets, m_document.Path());
+                } else m_status = "Save canceled";
+            }
+            if (m_document.HasPending() && !m_document.NeedsConfirmation()) {
+                bool replaced = false;
+                try { replaced = m_document.Advance(editScene, m_assets, [this] { return ChooseSavePath(); }); }
+                catch (...) { RefreshAssets(); throw; }
+                RefreshAssets();
+                if (replaced) { SceneChanged(editScene); m_status = m_document.Path().empty() ? "New scene" : "Scene opened"; }
+                else m_status = "Scene switch canceled";
+            }
+            if (m_requestPlay && !m_document.HasPending() && m_importSource.empty()) runtimeScene.emplace(editScene);
         }
-        if (m_requestDelete && !runtimeScene && m_hasSelection) {
-            editScene.DestroyEntitySubtree(m_selectedEntity);
-            m_hasSelection = false;
-        }
-        if (m_requestSave && !runtimeScene) SceneSerializer::Save(editScene, ResolveEditorPath(m_scenePath));
-        if (m_requestLoad && !runtimeScene) {
-            // 直接造一个新的 Scene
-            Scene loaded = SceneSerializer::Load(ResolveEditorPath(m_scenePath));
-            editScene = std::move(loaded);
-            m_hasSelection = false;
-            m_requestInstance.reset(); // 资产 ID 属于原 Scene，换场景后清除旧请求。
-        }
-        if (m_requestIblDemo && !runtimeScene) {
-            Scene loaded = SceneSerializer::Load(ResolveEditorPath("assets/phase8-ibl.scene.json"));
-            editScene = std::move(loaded);
-            m_hasSelection = false;
-            m_requestInstance.reset();
-        }
-        if (m_requestEnvironment && !runtimeScene) {
-            const auto source = ResolveEditorPath(m_environmentPath);
-            // 先读/烘焙完整候选数据，成功后才替换。失败不污染现有 Scene。
-            const auto loaded = LoadEnvironment(source);
-            const auto encoded = source.generic_u8string();
-            editScene.environment.sourcePath.assign(reinterpret_cast<const char*>(encoded.data()), encoded.size());
-            editScene.environmentData = loaded.data;
-            editScene.environment.enabled = true;
-            editScene.environment.background = true;
-        }
-        if (m_requestClearEnvironment && !runtimeScene) {
-            editScene.environment = {};
-            editScene.environmentData.reset();
-        }
-        if ((m_requestLoad || m_requestIblDemo) && !runtimeScene && !editScene.environment.sourcePath.empty())
-            std::snprintf(m_environmentPath, sizeof(m_environmentPath), "%s", editScene.environment.sourcePath.c_str());
-        if (m_requestImport && !runtimeScene) {
-            // 原基础上新增 Import 内容
-            Scene candidate(editScene);
-            const std::vector<Entity> roots = ModelImporter::Import(candidate, ResolveEditorPath(m_modelPath));
-            editScene = std::move(candidate);
-            if (!roots.empty()) Select(roots.front());
-        }
-        if (m_requestInstance && !runtimeScene) {
-            Scene candidate(editScene);
-            const std::vector<Entity> roots = ModelImporter::InstantiateAsset(candidate,
-                candidate.FindModelAssetIndex(*m_requestInstance));
-            editScene = std::move(candidate);
-            Select(roots.front());
-        }
-        if (m_requestPlay || m_requestStop || m_requestCreate || m_requestDelete || m_requestSave || m_requestLoad || m_requestImport || m_requestInstance ||
-            m_requestEnvironment || m_requestClearEnvironment || m_requestIblDemo)
-            m_status = "Scene operation completed";
     } catch (const std::exception& error) {
         m_status = error.what();
+        // 导入失败关闭命名框，下一次 Import 可重新选择；候选目录由 ProjectAssets 回收。
+        if (m_requestImport) m_importSource.clear();
     }
-    m_requestCreate = m_requestDelete = m_requestPlay = m_requestStop = false;
-    m_requestSave = m_requestLoad = false;
-    m_requestImport = false;
+    m_requestCreate = m_requestCreateEmpty = m_requestDelete = m_requestPlay = m_requestStop = false;
+    m_requestImport = m_requestPickImport = m_requestRefresh = false;
     m_requestEnvironment = m_requestClearEnvironment = m_requestIblDemo = false;
+    m_fileCommand = FileCommand::None;
     m_requestInstance.reset();
 }
+
 
 Scene& Editor::ActiveScene(Scene& editScene, std::optional<Scene>& runtimeScene)
 {
@@ -459,6 +581,7 @@ EditorInputCapture Editor::InputCapture() const
         return {};
     }
 
+    if (m_nativeInputGuard || m_document.NeedsConfirmation() || !m_importSource.empty()) return {true, true};
     const ImGuiIO& io = ImGui::GetIO();
     if (m_gizmoCaptured || ImGuizmo::IsUsingAny()) return { true, true };
     const bool viewportInput = m_viewportHovered && m_viewportFocused && !ImGui::IsAnyItemActive() &&
@@ -470,7 +593,8 @@ EditorInputCapture Editor::InputCapture() const
 
 InputState Editor::CameraInput(InputState input)
 {
-    const bool blocked = m_gizmoCaptured || ImGuizmo::IsUsingAny() ||
+    const bool blocked = m_nativeInputGuard || m_document.HasPending() || !m_importSource.empty() ||
+        m_gizmoCaptured || ImGuizmo::IsUsingAny() ||
         ImGui::IsAnyItemActive() || ImGui::GetDragDropPayload() != nullptr;
     input = FilterViewportCamera(input, m_viewportRect, m_viewportFocused,
         m_cameraGesture, blocked, m_cameraAdmitted);

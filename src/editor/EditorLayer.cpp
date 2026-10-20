@@ -1,9 +1,15 @@
 ﻿#include "editor/EditorLayer.h"
 
-void EditorLayer::OnAttach() { m_editScene.emplace(BuildDemo2DScene()); }
+void EditorLayer::OnAttach()
+{
+    m_editor.InitializeLayout();
+    m_editScene.emplace(SceneDocument::EmptyScene());
+}
 
 void EditorLayer::OnDetach() noexcept
 {
+    // 层卸载早于 Renderer/ImGui Context 清理，最后一次布局仍可序列化。
+    m_editor.SaveLayout();
     m_runtimeScene.reset();
     m_editScene.reset();
 }
@@ -17,6 +23,7 @@ void EditorLayer::OnEvent(Event& event)
 
 void EditorLayer::OnUpdate(FrameContext& frame)
 {
+    if (m_editor.ConsumeDialogPause()) frame.deltaSeconds = 0;
     Scene& activeScene = m_editor.ActiveScene(*m_editScene, m_runtimeScene);
     m_cameraController.Update(activeScene.camera, m_editor.CameraInput(frame.input), frame.deltaSeconds);
     frame.viewportRequest = m_editor.Viewport();
@@ -35,7 +42,9 @@ void EditorLayer::OnImGuiRender(const FrameContext& frame)
 
 void EditorLayer::OnFrameEnd()
 {
+    m_editor.UpdateLayoutPersistence();
     const bool wasPlaying = m_runtimeScene.has_value();
     m_editor.ApplyPending(*m_editScene, m_runtimeScene);
+    if (m_editor.ConsumeSceneChange()) m_editUpdater = SceneUpdater{};
     if (wasPlaying != m_runtimeScene.has_value()) m_runtimeUpdater = SceneUpdater{};
 }

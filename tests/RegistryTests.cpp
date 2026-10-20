@@ -23,6 +23,9 @@ bool Stage8Checks(int& assertions);
 bool Stage9Checks(int& assertions);
 bool Stage10Checks(int& assertions);
 bool Stage11Checks(int& assertions);
+bool Stage13Checks(int& assertions);
+bool Stage14Checks(int& assertions);
+bool Stage15Checks(int& assertions);
 
 namespace {
 
@@ -551,7 +554,7 @@ int main()
         !GltfModelImportsAndSceneRoundTrips() ||
         !EmissiveMaterialsEnterSnapshotsAndRoundTrip() ||
         !ModelAssetsReuseResourcesAndKeepInstancesIndependent() ||
-        !ModelResourceOriginsFollowAssetIdentity() || !Stage6Checks(g_checks) || !Stage7Checks(g_checks) || !Stage8Checks(g_checks) || !Stage9Checks(g_checks) || !Stage10Checks(g_checks) || !Stage11Checks(g_checks)) {
+        !ModelResourceOriginsFollowAssetIdentity() || !Stage6Checks(g_checks) || !Stage7Checks(g_checks) || !Stage8Checks(g_checks) || !Stage9Checks(g_checks) || !Stage10Checks(g_checks) || !Stage11Checks(g_checks) || !Stage13Checks(g_checks) || !Stage14Checks(g_checks) || !Stage15Checks(g_checks)) {
         return EXIT_FAILURE;
     }
 

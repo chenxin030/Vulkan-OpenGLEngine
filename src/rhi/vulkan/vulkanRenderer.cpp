@@ -2,6 +2,7 @@
 
 #include "scene/RenderSnapshot.h"
 #include "core/ScopeExit.h"
+#include "core/Profiling.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -110,6 +111,7 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateSurface();
     PickPhysicalDevice();
     CreateLogicalDevice();
+    CreateTimingQueries();
 
     CreateAllocator();
 
@@ -161,6 +163,9 @@ void VulkanRenderer::Cleanup() {
     m_inFlightFences.clear();
     // m_renderFinishedSemaphores 属于交换链，会在下面的 CleanupSwapChain() 中释放。
 
+    if (m_timestampPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(m_device, m_timestampPool, nullptr); m_timestampPool = VK_NULL_HANDLE;
+    }
     if (m_commandPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(m_device, m_commandPool, nullptr);
         m_commandPool = VK_NULL_HANDLE;
@@ -241,6 +246,10 @@ void VulkanRenderer::WaitIdle()
 void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     const std::function<void()>& drawEditorUi) {
 
+    ZoneScopedN("Vulkan.DrawFrameIncludingWaits");
+    const auto renderStart = ProfileClock::now();
+    m_metrics = {}; m_metrics.frame = ++m_frameSequence;
+    ScopeExit renderTimer([&] { m_metrics.renderCpuMs = ProfileMilliseconds(renderStart); });
     // 轮询帧缓冲区大小而不是使用调整大小回调可以减少动用的部分，而且还能自动处理 DPI 变化。
     int width = 0;
     int height = 0;
@@ -269,14 +278,22 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     if (m_viewportRequest.visible && m_viewportRequest.extent.Valid() && m_viewportExtent.Valid())
         m_viewportImage = {uint64_t(m_viewportTargets[m_currentFrame].imguiSet), m_viewportExtent,
             {0, 0}, {1, 1}, m_viewportStatus};
-    vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
+    {
+        ZoneScopedN("Vulkan.FenceWait");
+        const auto start = ProfileClock::now();
+        vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
+        m_metrics.fenceMs = ProfileMilliseconds(start);
+    }
+    ReadTimingQueries();
     EnsureMaterialTexturesUploaded(*snapshot.materials);
     EnsureEnvironmentUploaded(snapshot.environmentData ? snapshot.environmentData : FallbackEnvironment());
 
     uint32_t imageIndex = 0;
+    const auto acquireStart = ProfileClock::now();
     VkResult result = vkAcquireNextImageKHR(m_device, m_swapChain, UINT64_MAX,
         m_imageAvailableSemaphores[m_currentFrame],
         VK_NULL_HANDLE, &imageIndex);
+    m_metrics.acquireMs = ProfileMilliseconds(acquireStart);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         RecreateSwapChain();
@@ -333,7 +350,13 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     presentInfo.pSwapchains = swapChains;
     presentInfo.pImageIndices = &imageIndex;
 
-    result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+    {
+        ZoneScopedN("Vulkan.Present");
+        const auto start = ProfileClock::now();
+        result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+        m_metrics.presentMs = ProfileMilliseconds(start);
+    }
+    m_metrics.submitted = m_viewportImage.Valid();
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         RecreateSwapChain();
@@ -528,6 +551,10 @@ void VulkanRenderer::CreateLogicalDevice() {
 
 void VulkanRenderer::CreateSwapChain() {
     const SwapChainSupportDetails support = QuerySwapChainSupport(m_physicalDevice);
+    const auto selectedPresentMode = ChooseSwapPresentMode(support.presentModes);
+    m_deviceInfo.presentMode = selectedPresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" :
+        selectedPresentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo";
+    m_deviceInfo.presentationLimited = m_configuration.uncapped && selectedPresentMode != VK_PRESENT_MODE_IMMEDIATE_KHR;
 
     VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(support.formats);
     VkPresentModeKHR presentMode = ChooseSwapPresentMode(support.presentModes);
@@ -1114,7 +1141,9 @@ VkSurfaceFormatKHR VulkanRenderer::ChooseSwapSurfaceFormat(const std::vector<VkS
 VkPresentModeKHR VulkanRenderer::ChooseSwapPresentMode(
     const std::vector<VkPresentModeKHR>& availablePresentModes) const
 {
-    // Mailbox 最接近“无上限但不丢失”. FIFO 是唯一保证存在的模式，所以它是备用方案。
+    if (m_configuration.uncapped)
+        for (const auto mode : availablePresentModes) if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) return mode;
+    // Mailbox / FIFO remain available when immediate presentation is unsupported.
     for (const VkPresentModeKHR availablePresentMode : availablePresentModes) {
         if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
             return availablePresentMode;
@@ -1549,6 +1578,7 @@ void VulkanRenderer::RecordShadowPass(VkCommandBuffer commandBuffer, const Rende
         vkCmdPushConstants(commandBuffer, m_shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
             0, sizeof(glm::mat4), &item.worldTransform);
         vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+        if (m_configuration.transport) { ++m_metrics.shadowDraws; m_metrics.shadowTriangles += mesh.indexCount / 3; }
     }
     vkCmdEndRenderPass(commandBuffer);
 }
@@ -2341,8 +2371,11 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         throw std::runtime_error("failed to begin recording command buffer!");
     }
 
+    if (m_timestampPool) vkCmdResetQueryPool(commandBuffer, m_timestampPool, m_currentFrame * 5, 5);
+    Timestamp(commandBuffer, 0);
     if (m_viewportImage.Valid()) {
         RecordShadowPass(commandBuffer, snapshot);
+        Timestamp(commandBuffer, 1);
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2400,8 +2433,10 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
                 0, sizeof(PushConstants), &push);
 
             vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+            if (m_configuration.transport) { ++m_metrics.sceneDraws; m_metrics.sceneTriangles += mesh.indexCount / 3; }
         }
 
+        Timestamp(commandBuffer, 2);
         vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2414,6 +2449,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
         vkCmdEndRenderPass(commandBuffer);
     } // LDR 最终为 SHADER_READ_ONLY；离屏 pass 的 external dependency 保障 UI 采样。
+    Timestamp(commandBuffer, 3);
 
     VkRenderPassBeginInfo uiPass{};
     uiPass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2431,6 +2467,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
     }
 
     vkCmdEndRenderPass(commandBuffer);
+    Timestamp(commandBuffer, 4);
+    if (m_timestampPool) m_timestampFrames[m_currentFrame] = m_metrics.frame;
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
         throw std::runtime_error("failed to record command buffer!");
     }
@@ -2447,7 +2485,9 @@ void VulkanRenderer::InitImGui()
     m_imguiContextCreated = true;
 
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+    // EditorLayout 通过内存接口加载/保存，避免隐式读取工作目录中的旧 imgui.ini。
+    io.IniFilename = nullptr;
     // Image 不抢 ActiveId；窗口只能从标题栏移动，避免场景点击/操纵轴带动整个面板。
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
@@ -2536,10 +2576,12 @@ void VulkanRenderer::ShutdownImGui()
 
 void VulkanRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
 {
-    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_FirstUseEver);
+    // 共享编辑器先提交 DockSpace；诊断面板随后参与同一布局。
+    drawEditorUi();
+    if (m_configuration.transport) return;
 
-    ImGui::Begin("Renderer Diagnostics - Vulkan");
+    ImGui::Begin("Renderer Diagnostics", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted("Vulkan");
 
     // io.Framerate 在第一帧为 0
     const ImGuiIO& io = ImGui::GetIO();
@@ -2558,7 +2600,6 @@ void VulkanRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
     ImGui::Separator();
     ImGui::End();
 
-    drawEditorUi();
 }
 
 VkShaderModule VulkanRenderer::CreateShaderModule(const std::vector<char>& code) const
@@ -3006,4 +3047,47 @@ void VulkanRenderer::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkQueueWaitIdle(m_graphicsQueue);
 
     vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
+}
+
+void VulkanRenderer::CreateTimingQueries()
+{
+    m_deviceInfo.backend = "vulkan"; m_deviceInfo.device = m_deviceName;
+#ifndef NDEBUG
+    m_deviceInfo.validation = true;
+#endif
+    if (!m_configuration.transport) return;
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &count, families.data());
+    m_timestampBits = families.at(*FindQueueFamilies(m_physicalDevice).graphicsFamily).timestampValidBits;
+    if (!m_timestampBits) return;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+    m_timestampPeriod = properties.limits.timestampPeriod;
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP; info.queryCount = kMaxFramesInFlight * 5;
+    if (vkCreateQueryPool(m_device, &info, nullptr, &m_timestampPool) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create GPU timestamp queries");
+    m_deviceInfo.gpuTimestamps = true;
+}
+void VulkanRenderer::Timestamp(VkCommandBuffer buffer, uint32_t marker)
+{
+    if (m_timestampPool) vkCmdWriteTimestamp(buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        m_timestampPool, m_currentFrame * 5 + marker);
+}
+void VulkanRenderer::ReadTimingQueries()
+{
+    if (!m_timestampPool || !m_timestampFrames[m_currentFrame]) return;
+    std::array<uint64_t,5> ticks{};
+    // Read only after the normal frame-slot fence. No additional waits or WAIT_BIT.
+    const auto result = vkGetQueryPoolResults(m_device, m_timestampPool, m_currentFrame * 5, 5,
+        sizeof(ticks), ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (result == VK_SUCCESS) {
+        const uint64_t mask = m_timestampBits == 64 ? UINT64_MAX : (uint64_t(1) << m_timestampBits) - 1;
+        const auto ms = [&](int a, int b) { return double((ticks[b] - ticks[a]) & mask) * m_timestampPeriod / 1e6; };
+        m_gpuSamples.push_back({m_timestampFrames[m_currentFrame], ms(0,1), ms(1,2), ms(2,3), ms(3,4)});
+    } else if (result == VK_NOT_READY) ++m_skippedGpuSamples;
+    else throw std::runtime_error("Failed reading GPU timestamp queries");
+    m_timestampFrames[m_currentFrame] = 0;
 }

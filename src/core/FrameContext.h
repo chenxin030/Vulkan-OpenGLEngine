@@ -4,6 +4,7 @@
 #include "rhi/Viewport.h"
 #include "scene/RenderSnapshot.h"
 #include <optional>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -13,6 +14,7 @@ class LayerStack;
 class FrameContext
 {
 public:
+    std::chrono::steady_clock::time_point frameStarted = std::chrono::steady_clock::now();
     float deltaSeconds = 0;
     InputState input;
     glm::vec2 framebufferSize{0};

@@ -11,6 +11,8 @@ struct Scene;
 class ModelImporter
 {
 public:
+    // 项目导入需要复制主文件及所有声明的外部 buffer/image，保持相对路径。
+    static std::vector<std::filesystem::path> SourceFiles(const std::filesystem::path& path);
     // 返回值是 Scene 内运行时数组下标
     static uint32_t LoadAsset(Scene& scene, const std::filesystem::path& path,
         const std::string& savedId = {}, const std::string& expectedFingerprint = {});

@@ -227,6 +227,8 @@ void SceneSerializer::Save(const Scene& scene, const std::filesystem::path& path
     if (!file) throw std::runtime_error("cannot open scene for writing: " + path.string());
     file << root.dump(2) << '\n';
     if (!file) throw std::runtime_error("failed writing scene: " + path.string());
+    file.close();
+    if (!file) throw std::runtime_error("failed closing scene: " + path.string());
 }
 
 Scene SceneSerializer::Load(const std::filesystem::path& path)

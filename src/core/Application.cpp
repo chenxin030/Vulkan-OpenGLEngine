@@ -28,6 +28,10 @@ Application::Application(std::unique_ptr<Renderer> renderer, ApplicationSpecific
         m_glfwInitialized = true;
         glfwDefaultWindowHints();
         m_renderer->ConfigureWindowHints();
+        if (spec.pixelSizedWindow) {
+            glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
+            glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
+        }
         glfwWindowHint(GLFW_VISIBLE, spec.visible ? GLFW_TRUE : GLFW_FALSE);
         m_window = glfwCreateWindow(spec.width, spec.height, spec.title, nullptr, nullptr);
         if (!m_window) throw std::runtime_error("ERROR: GLFW window create");
@@ -83,6 +87,7 @@ void Application::Run()
     double previousTime = glfwGetTime();
     bool paused = false;
     while (m_running && !glfwWindowShouldClose(m_window)) {
+        const auto frameStarted = std::chrono::steady_clock::now();
         glfwPollEvents();
 
         // 保留现有上一帧 UI capture；左键当前状态的优先过滤在 GlfwInput 内完成。
@@ -102,6 +107,7 @@ void Application::Run()
 
         const double now = glfwGetTime();
         FrameContext frame;
+        frame.frameStarted = frameStarted;
         frame.deltaSeconds = paused ? 0.0f : static_cast<float>(now - previousTime);
         previousTime = now;
         paused = false;

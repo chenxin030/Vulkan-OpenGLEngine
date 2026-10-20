@@ -1,5 +1,6 @@
 ﻿#include "core/LayerStack.h"
 #include "rhi/Renderer.h"
+#include "core/Profiling.h"
 #include <stdexcept>
 
 namespace {
@@ -78,6 +79,7 @@ EditorInputCapture LayerStack::InputCapture() const
 
 void LayerStack::RunFrame(Renderer& renderer, FrameContext& frameContext)
 {
+    ZoneScopedN("Engine.Frame");
     TraversalGuard guard(m_traversing);
     try {
         for (auto& layer : m_layers) layer->OnUpdate(frameContext);

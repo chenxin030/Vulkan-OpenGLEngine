@@ -1,246 +1,155 @@
-﻿#pragma once
-
+#pragma once
 #include "scene/Entity.h"
-
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <new>
 #include <stdexcept>
+#include <tuple>
 #include <typeindex>
-#include <unordered_map>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// 存储 Component：一种组件类型对应一个数组。
-
-// --------
-// 按组件类型：有一个密集的 components 数组，一个平行对应的 owners 数组，以及一个从 Entity Index 到数组位置的 slot map
-// 移除操作是交换并弹出，因此是 O(1)，数组不会产生空洞，即迭代是连续的
-// 代价是移除会重新排序数组，所以不能依赖迭代顺序
-// ---------------------------------------------------------------------------
-class Registry
-{
+// 阶段 15：同组件组合属于同一 Archetype，每个 Chunk 固定 128 行。
+// 原 Storage 的密集数组 / swap-and-pop 思路保留，但交换的是整行。
+// 旧实现及学习注释完整保存在 phase15-original 归档。单线程，遍历顺序不保证。
+class Registry {
 public:
+    static constexpr std::size_t ChunkCapacity = 128;
     Registry() = default;
     Registry(const Registry& other);
     Registry& operator=(const Registry& other);
-    Registry(Registry&&) noexcept = default;
-    Registry& operator=(Registry&&) noexcept = default;
-
+    Registry(Registry&& other) noexcept;
+    Registry& operator=(Registry&& other) noexcept;
     void Swap(Registry& other) noexcept;
-
     Entity Create();
-
-    // 销毁实体并分离它拥有的每个组件
     void Destroy(Entity entity);
-
     bool IsAlive(Entity entity) const;
-
-    template <typename Fn>
-    void ForEachEntity(Fn&& fn) const;
-
-    template <typename T, typename... Args>
-    T& Add(Entity entity, Args&&... args);
-
-    template <typename T>
-    bool Has(Entity entity) const;
-
-    template <typename T>
-    T* TryGet(Entity entity);
-
-    template <typename T>
-    const T* TryGet(Entity entity) const;
-
-    template <typename T>
-    void Remove(Entity entity);
-
-    // 访问同时拥有 TFirst 和 TRest 所有组件的 Entity。
-    // 可以优化成选择最小的数组，更快
-    // fn 不允许创建或销毁实体。在遍历数组的同时添加或移除组件可能会导致数组在循环中被重新分配。
-    template <typename TFirst, typename... TRest, typename Fn>
-    void ForEach(Fn&& fn);
-
     std::size_t EntityCount() const { return m_liveCount; }
-
+    template <typename Fn> void ForEachEntity(Fn&& fn) const;
+    template <typename T, typename... Args> T& Add(Entity entity, Args&&... args);
+    template <typename T> bool Has(Entity entity) const;
+    template <typename T> T* TryGet(Entity entity);
+    template <typename T> const T* TryGet(Entity entity) const;
+    template <typename T> void Remove(Entity entity);
+    template <typename TFirst, typename... TRest, typename Fn> void ForEach(Fn&& fn);
+    template <typename TFirst, typename... TRest, typename Fn> void ForEach(Fn&& fn) const;
+    // 结构变更后重新 TryGet：迁移行和补洞行的所有组件地址都可能改变。
+    // 回调可改字段/嵌套查询，禁止结构变更。Swap/move/析构不能操作正在遍历的对象。
 private:
-    struct IStorage
-    {
-        virtual ~IStorage() = default;
-        virtual void Detach(Entity entity) = 0;
-        virtual std::unique_ptr<IStorage> Clone() const = 0;
+    struct TypeInfo {
+        std::type_index key;
+        std::size_t size, alignment;
+        void (*copy)(void*, const void*);
+        void (*move)(void*, void*) noexcept;
+        void (*destroy)(void*) noexcept;
     };
-
-    template <typename T>
-    struct Storage final : IStorage
-    {
-        std::vector<Entity> owners;                        // parallel to components
-        std::vector<T> components;
-        std::unordered_map<uint32_t, std::size_t> slotOf;  // entity index -> slot
-
-        std::unique_ptr<IStorage> Clone() const override
-        {
-            return std::make_unique<Storage<T>>(*this);
-        }
-
-        void Detach(Entity entity) override
-        {
-            const auto it = slotOf.find(entity.index);
-
-            // Detach 也会被旧句柄直接调用（Remove<T>），那时 Destroy 根本没跑过。
-            // 没有这道检查，一个槽位已被回收的句柄会分离掉当前占用者的组件。
-            if (it == slotOf.end() || owners[it->second].generation != entity.generation) {
-                return;
-            }
-
-            const std::size_t slot = it->second;
-            const std::size_t last = components.size() - 1;
-
-            owners[slot] = owners[last];
-            components[slot] = std::move(components[last]);
-            slotOf[owners[slot].index] = slot;
-
-            owners.pop_back();
-            components.pop_back();
-            slotOf.erase(it);
-        }
-
-        T* Find(Entity entity)
-        {
-            const auto it = slotOf.find(entity.index);
-            if (it == slotOf.end() || owners[it->second].generation != entity.generation) {
-                return nullptr;
-            }
-            return &components[it->second];
-        }
-
-        const T* Find(Entity entity) const
-        {
-            const auto it = slotOf.find(entity.index);
-            if (it == slotOf.end() || owners[it->second].generation != entity.generation) {
-                return nullptr;
-            }
-            return &components[it->second];
-        }
+    template <typename T> static const TypeInfo& Type() {
+        static_assert(std::is_copy_constructible_v<T>, "Scene copies require copyable components");
+        static_assert(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_destructible_v<T>,
+            "Chunk relocation requires noexcept move construction and destruction");
+        static const TypeInfo info{typeid(T), sizeof(T), alignof(T),
+            [](void* to, const void* from) { std::construct_at(static_cast<T*>(to), *static_cast<const T*>(from)); },
+            [](void* to, void* from) noexcept { std::construct_at(static_cast<T*>(to), std::move(*static_cast<T*>(from))); },
+            [](void* p) noexcept { std::destroy_at(static_cast<T*>(p)); }};
+        return info;
+    }
+    struct Archetype;
+    struct Chunk {
+        explicit Chunk(const Archetype& owner);
+        ~Chunk();
+        Chunk(const Chunk&) = delete;
+        Chunk& operator=(const Chunk&) = delete;
+        void* At(std::size_t column, std::size_t row);
+        const void* At(std::size_t column, std::size_t row) const;
+        const Archetype& archetype;
+        std::byte* data = nullptr;
+        std::array<Entity, ChunkCapacity> entities{};
+        std::size_t count = 0;
     };
-
-    template <typename T>
-    Storage<T>& StorageFor();
-
-    template <typename T>
-    const Storage<T>* FindStorage() const;
-
-    std::vector<uint32_t> m_generations;
-    std::vector<bool> m_alive;
+    struct Archetype {
+        explicit Archetype(std::vector<const TypeInfo*> signature);
+        std::size_t Column(std::type_index key) const;
+        std::vector<const TypeInfo*> types; // type_index 排序，注册顺序无关
+        std::vector<std::size_t> offsets;
+        std::size_t bytes = 0, alignment = alignof(std::max_align_t);
+        std::vector<std::unique_ptr<Chunk>> chunks;
+        std::size_t firstAvailable = 0;
+    };
+    struct Location { Archetype* archetype = nullptr; std::size_t chunk = 0, row = 0; };
+    struct Slot { uint32_t generation = 0; bool alive = false; Location location; };
+    struct Iteration {
+        explicit Iteration(const Registry& r) : registry(r) { ++registry.m_iterations; }
+        ~Iteration() { --registry.m_iterations; }
+        const Registry& registry;
+    };
+    void CheckStructuralChange() const;
+    Archetype& FindOrCreate(std::vector<const TypeInfo*> types);
+    Location ReserveRow(Archetype& archetype);
+    void EraseRow(Location location) noexcept;
+    void Migrate(Entity entity, Archetype& target, const TypeInfo* added, void* value);
+    // 每个 Archetype 只查一次列号，每行直接访问列；暂不保留跨调用查询缓存。
+    template <typename... Ts, typename Self, typename Fn> static void Visit(Self& self, Fn&& fn) {
+        Iteration iteration(self);
+        for (const auto& archetype : self.m_archetypes) {
+            const std::array columns{archetype->Column(typeid(Ts))...};
+            if (std::find(columns.begin(), columns.end(), archetype->types.size()) != columns.end()) continue;
+            for (const auto& chunk : archetype->chunks) {
+                auto bases = [&]<std::size_t... I>(std::index_sequence<I...>) {
+                    return std::tuple{static_cast<std::conditional_t<std::is_const_v<Self>, const Ts*, Ts*>>(
+                        chunk->At(columns[I], 0))...};
+                }(std::index_sequence_for<Ts...>{});
+                for (std::size_t row = 0; row < chunk->count; ++row)
+                    std::apply([&](auto*... base) { fn(std::as_const(chunk->entities[row]), base[row]...); }, bases);
+            }
+        }
+    }
+    std::vector<Slot> m_slots;
     std::vector<uint32_t> m_freeIndices;
     std::size_t m_liveCount = 0;
-
-    // 每种组件类型一个存储，以 std::type_index 为键。
-    // 类型被 IStorage 擦除，所以一个 map 就能存放它们所有；StorageFor() 中的向下转换在构造时就会检查，因为键本身就是 typeid(T)。
-    std::unordered_map<std::type_index, std::unique_ptr<IStorage>> m_storages;
+    std::vector<std::unique_ptr<Archetype>> m_archetypes;
+    mutable std::size_t m_iterations = 0;
 };
 
-// ---------------------------------------------------------------------------
-// Template definitions
-// ---------------------------------------------------------------------------
-
-template <typename T>
-Registry::Storage<T>& Registry::StorageFor()
-{
-    const std::type_index key(typeid(T));
-
-    const auto it = m_storages.find(key);
-    if (it != m_storages.end()) {
-        return static_cast<Storage<T>&>(*it->second);
-    }
-
-    // 第一次使用某种组件时创建，一个组件类型在实际被使用之前是不会花费任何资源的。
-    auto storage = std::make_unique<Storage<T>>();
-    Storage<T>& reference = *storage;
-    m_storages.emplace(key, std::move(storage));
-    return reference;
+template <typename Fn> void Registry::ForEachEntity(Fn&& fn) const {
+    Iteration iteration(*this);
+    for (std::size_t index = 0; index < m_slots.size(); ++index)
+        if (m_slots[index].alive) fn(Entity{static_cast<uint32_t>(index), m_slots[index].generation});
 }
-
-template <typename Fn>
-void Registry::ForEachEntity(Fn&& fn) const
-{
-    for (std::size_t index = 0; index < m_alive.size(); ++index) {
-        if (m_alive[index]) {
-            fn(Entity{ static_cast<uint32_t>(index), m_generations[index] });
-        }
-    }
+template <typename T, typename... Args> T& Registry::Add(Entity entity, Args&&... args) {
+    CheckStructuralChange();
+    if (!IsAlive(entity)) throw std::runtime_error("Registry::Add called with a dead or invalid entity");
+    if (Has<T>(entity)) throw std::runtime_error("Registry::Add called for a component the entity already has");
+    // 先构造候选，允许参数引用当前组件；构造失败时原行完全不变。
+    T value(std::forward<Args>(args)...);
+    auto types = m_slots[entity.index].location.archetype->types;
+    types.push_back(&Type<T>());
+    auto& target = FindOrCreate(std::move(types));
+    Migrate(entity, target, &Type<T>(), &value);
+    return *TryGet<T>(entity);
 }
-
-template <typename T>
-const Registry::Storage<T>* Registry::FindStorage() const
-{
-    const auto it = m_storages.find(std::type_index(typeid(T)));
-    if (it == m_storages.end()) {
-        return nullptr;
-    }
-    return static_cast<const Storage<T>*>(it->second.get());
+template <typename T> bool Registry::Has(Entity entity) const { return TryGet<T>(entity) != nullptr; }
+template <typename T> T* Registry::TryGet(Entity entity) {
+    return const_cast<T*>(std::as_const(*this).TryGet<T>(entity));
 }
-
-template <typename T, typename... Args>
-T& Registry::Add(Entity entity, Args&&... args)
-{
-    if (!IsAlive(entity)) {
-        throw std::runtime_error("Registry::Add called with a dead or invalid entity");
-    }
-
-    Storage<T>& storage = StorageFor<T>();
-
-    if (storage.Find(entity) != nullptr) {
-        throw std::runtime_error("Registry::Add called for a component the entity already has");
-    }
-
-    storage.owners.push_back(entity);
-    storage.components.emplace_back(std::forward<Args>(args)...);
-    storage.slotOf[entity.index] = storage.components.size() - 1;
-
-    return storage.components.back();
+template <typename T> const T* Registry::TryGet(Entity entity) const {
+    if (!IsAlive(entity)) return nullptr;
+    const auto& location = m_slots[entity.index].location;
+    const auto column = location.archetype->Column(typeid(T));
+    if (column == location.archetype->types.size()) return nullptr;
+    return static_cast<const T*>(location.archetype->chunks[location.chunk]->At(column, location.row));
 }
-
-template <typename T>
-bool Registry::Has(Entity entity) const
-{
-    const Storage<T>* storage = FindStorage<T>();
-    return storage != nullptr && storage->Find(entity) != nullptr;
+template <typename T> void Registry::Remove(Entity entity) {
+    CheckStructuralChange();
+    if (!Has<T>(entity)) return; // generation 检查防止陈旧句柄伤到新占用者。
+    auto types = m_slots[entity.index].location.archetype->types;
+    std::erase_if(types, [](const TypeInfo* type) { return type->key == typeid(T); });
+    auto& target = FindOrCreate(std::move(types));
+    Migrate(entity, target, nullptr, nullptr);
 }
-
-template <typename T>
-T* Registry::TryGet(Entity entity)
-{
-    return StorageFor<T>().Find(entity);
-}
-
-template <typename T>
-const T* Registry::TryGet(Entity entity) const
-{
-    const Storage<T>* storage = FindStorage<T>();
-    return storage != nullptr ? storage->Find(entity) : nullptr;
-}
-
-template <typename T>
-void Registry::Remove(Entity entity)
-{
-    StorageFor<T>().Detach(entity);
-}
-
 template <typename TFirst, typename... TRest, typename Fn>
-void Registry::ForEach(Fn&& fn)
-{
-    Storage<TFirst>& primary = StorageFor<TFirst>();
-
-    for (std::size_t i = 0; i < primary.owners.size(); ++i) {
-        const Entity entity = primary.owners[i];
-
-        // 用空的 TRest 会返回是 true，单组件情况不需要特殊处理。
-        if (!(Has<TRest>(entity) && ...)) {
-            continue;
-        }
-
-        // 用一个空的 TRest 包，会扩展为 fn(entity, component)，会如预期进行。
-        // 没指定参数求值顺序，每次查找都是纯读，无法观察到顺序。
-        fn(entity, primary.components[i], *TryGet<TRest>(entity)...);
-    }
-}
+void Registry::ForEach(Fn&& fn) { Visit<TFirst, TRest...>(*this, std::forward<Fn>(fn)); }
+template <typename TFirst, typename... TRest, typename Fn>
+void Registry::ForEach(Fn&& fn) const { Visit<TFirst, TRest...>(*this, std::forward<Fn>(fn)); }

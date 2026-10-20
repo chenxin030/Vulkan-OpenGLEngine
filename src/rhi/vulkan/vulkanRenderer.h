@@ -95,7 +95,14 @@ public:
 	
 private:
 
-	// one-time initialisation
+    VkQueryPool m_timestampPool = VK_NULL_HANDLE;
+    std::array<uint64_t,kMaxFramesInFlight> m_timestampFrames{};
+    float m_timestampPeriod = 0;
+    uint32_t m_timestampBits = 0;
+    void CreateTimingQueries();
+    void ReadTimingQueries();
+    void Timestamp(VkCommandBuffer buffer, uint32_t marker);
+    // one-time initialisation
 	void CreateInstance();
 	void SetupDebugMessenger();
 	void CreateSurface();

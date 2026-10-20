@@ -1,6 +1,8 @@
 ﻿#pragma once
 
 #include <functional>
+#include "rhi/RenderMetrics.h"
+#include <utility>
 #include "rhi/Viewport.h"
 
 struct GLFWwindow;
@@ -26,6 +28,17 @@ public:
 	virtual void WaitIdle() = 0;
 	// Application 在正常退出时先 WaitIdle；Cleanup 也必须支持 Init 中途失败及重复调用。
 	virtual void Cleanup() = 0;
+    // Set before Init. Shared runtime policy; GPU ownership stays in each backend.
+    void Configure(RenderConfiguration config) { m_configuration = config; }
+    const RenderMetrics& Metrics() const { return m_metrics; }
+    const RenderDeviceInfo& DeviceInfo() const { return m_deviceInfo; }
+    std::vector<GpuSample> TakeGpuSamples() { return std::exchange(m_gpuSamples, {}); }
+    uint64_t SkippedGpuSamples() const { return m_skippedGpuSamples; }
 protected:
+    RenderConfiguration m_configuration;
+    RenderMetrics m_metrics;
+    RenderDeviceInfo m_deviceInfo;
+    std::vector<GpuSample> m_gpuSamples;
+    uint64_t m_frameSequence = 0, m_skippedGpuSamples = 0;
 	ViewportRequest m_viewportRequest;
 };

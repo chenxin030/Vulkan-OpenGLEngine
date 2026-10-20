@@ -30,6 +30,7 @@
 // --- types ------------------------------------------------------------------
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
+typedef unsigned long long GLuint64;
 typedef int GLint;
 typedef int GLsizei;
 typedef unsigned char GLboolean;
@@ -43,6 +44,9 @@ typedef std::ptrdiff_t GLintptr;
 // --- enums ------------------------------------------------------------------
 // 只有这个后端实际命名的常量。添加一个只需一行修改；
 // 复制整个注册表就不是一行的事了。
+#define GL_TIMESTAMP 0x8E28
+#define GL_QUERY_RESULT_AVAILABLE 0x8867
+#define GL_QUERY_RESULT 0x8866
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_NO_ERROR 0
@@ -128,6 +132,11 @@ typedef std::ptrdiff_t GLintptr;
     X(glGetIntegerv, void, (GLenum pname, GLint* data))            \
     X(glViewport, void, (GLint, GLint, GLsizei, GLsizei))            \
     X(glGetString, const unsigned char*, (GLenum))                   \
+    X(glGenQueries, void, (GLsizei, GLuint*))                       \
+    X(glDeleteQueries, void, (GLsizei, const GLuint*))               \
+    X(glQueryCounter, void, (GLuint, GLenum))                       \
+    X(glGetQueryObjectiv, void, (GLuint, GLenum, GLint*))            \
+    X(glGetQueryObjectui64v, void, (GLuint, GLenum, GLuint64*))       \
     X(glFinish, void, ())                                            \
     X(glGetError, GLenum, ())                                        \
     X(glGenBuffers, void, (GLsizei, GLuint*))                        \

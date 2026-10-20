@@ -34,7 +34,7 @@ FetchContent_Declare(glfw
 
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.91.5
+    GIT_TAG        v1.91.5-docking
     GIT_SHALLOW    TRUE)
 
 FetchContent_Declare(stb
@@ -65,7 +65,14 @@ FetchContent_Declare(tinygltf
 
 set(TINYGLTF3_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(TINYGLTF3_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(glfw imgui stb vma nlohmann_json tinygltf)
+option(REBUILD_TRACY "Enable Tracy instrumentation" ON)
+set(TRACY_ENABLE ${REBUILD_TRACY} CACHE BOOL "" FORCE)
+set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+FetchContent_Declare(tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.13.1
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(glfw imgui stb vma nlohmann_json tinygltf tracy)
 
 if(Vulkan_GLSLC_EXECUTABLE)
     set(GLSLC_EXECUTABLE "${Vulkan_GLSLC_EXECUTABLE}")
@@ -124,11 +131,19 @@ set(IMGUI_SOURCES
     "${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
 
 add_executable(Rebuild
+    src/transport/TransportWorld.cpp
+    src/transport/TransportBenchmark.cpp
+    src/transport/TransportLayer.cpp
     src/core/Application.cpp
     src/core/LayerStack.cpp
     src/platform/GlfwEvents.cpp
     src/editor/EditorLayer.cpp
     src/editor/Editor.cpp
+    src/editor/EditorLayout.cpp
+    src/editor/AssetBrowser.cpp
+    src/editor/ProjectAssets.cpp
+    src/editor/SceneDocument.cpp
+    src/platform/FileDialogs.cpp
     src/editor/EditorGeometry.cpp
     third_party/ImGuizmo/ImGuizmo.cpp
     # 第二个后端。它存在的意义是检验 Renderer 接口是不是真的与后端无关 ——
@@ -165,6 +180,13 @@ if(BUILD_TESTING)
         tests/Stage9Tests.cpp
         tests/Stage10Tests.cpp
         tests/Stage11Tests.cpp
+        tests/Stage13Tests.cpp
+        tests/Stage14Tests.cpp
+        tests/Stage15Tests.cpp
+        src/transport/TransportWorld.cpp
+        src/transport/TransportBenchmark.cpp
+        src/editor/ProjectAssets.cpp
+        src/editor/SceneDocument.cpp
         src/core/Application.cpp
         src/core/LayerStack.cpp
         src/platform/GlfwEvents.cpp
@@ -189,6 +211,17 @@ if(BUILD_TESTING)
     target_include_directories(RebuildTests PRIVATE "${tinygltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
     target_compile_definitions(RebuildTests PRIVATE TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache")
     add_test(NAME Rebuild.Registry COMMAND RebuildTests)
+
+    # 真正的 ImGui Context/停靠树往返；不依赖 GLFW 窗口或 GPU。
+    add_executable(EditorLayoutTests tests/EditorLayoutTests.cpp src/editor/EditorLayout.cpp
+        "${imgui_SOURCE_DIR}/imgui.cpp" "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+        "${imgui_SOURCE_DIR}/imgui_tables.cpp" "${imgui_SOURCE_DIR}/imgui_widgets.cpp")
+    target_include_directories(EditorLayoutTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${imgui_SOURCE_DIR}")
+    target_compile_definitions(EditorLayoutTests PRIVATE LAYOUT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/layout-tests")
+    if(MSVC)
+        target_compile_options(EditorLayoutTests PRIVATE /utf-8)
+    endif()
+    add_test(NAME Rebuild.EditorLayout COMMAND EditorLayoutTests)
 endif()
 
 # Visual Studio 的虚拟文件夹按现有职责目录组织，.h 与 .cpp 放在同一组。
@@ -244,6 +277,7 @@ endfunction()
 organize_project_sources(Rebuild)
 if(BUILD_TESTING)
     organize_project_sources(RebuildTests)
+    organize_project_sources(EditorLayoutTests)
 endif()
 source_group(TREE "${imgui_SOURCE_DIR}" PREFIX "ThirdParty/ImGui" FILES ${IMGUI_SOURCES} ${IMGUI_HEADERS})
 source_group("ThirdParty/TinyGLTF" FILES "${tinygltf_SOURCE_DIR}/tiny_gltf_v3.c" ${TINYGLTF_HEADER})
@@ -275,6 +309,7 @@ target_compile_definitions(Rebuild PRIVATE
     IBL_CACHE_DIR="${CMAKE_CURRENT_BINARY_DIR}/ibl-cache"
     ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
+    EDITOR_LAYOUT_PATH="${CMAKE_CURRENT_BINARY_DIR}/editor-layout.ini"
     GLM_FORCE_RADIANS
     GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
@@ -283,6 +318,9 @@ target_link_libraries(Rebuild PRIVATE
     nlohmann_json::nlohmann_json
     OpenGL::GL
     Vulkan::Vulkan)
+if(WIN32)
+    target_link_libraries(Rebuild PRIVATE comdlg32)
+endif()
 
 if(MSVC)
     target_compile_options(Rebuild PRIVATE /utf-8)
@@ -293,3 +331,5 @@ if(MSVC)
     target_compile_options(Rebuild PRIVATE /W4)
     set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "/w")
 endif()
+
+target_link_libraries(Rebuild PRIVATE Tracy::TracyClient)

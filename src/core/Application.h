@@ -14,6 +14,7 @@ struct ApplicationSpecification
     int width = 720, height = 440;
     const char* title = "Engine";
     bool visible = true; // 隐藏窗口仅供生命周期检查，默认启动行为不变。
+    bool pixelSizedWindow = false; // Disable automatic monitor scaling for benchmark pixels.
 };
 
 // 单线程、单窗口；无全局实例。Renderer 注入让应用生命周期可用无 GPU 的替身验证。

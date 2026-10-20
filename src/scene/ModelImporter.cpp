@@ -748,6 +748,25 @@ uint32_t AppendAsset(Scene& scene, const std::filesystem::path& path, const std:
 
 } // namespace
 
+std::vector<std::filesystem::path> ModelImporter::SourceFiles(const std::filesystem::path& input)
+{
+    const auto path = std::filesystem::absolute(input).lexically_normal();
+    ContentFingerprint fingerprint;
+    auto model = ParseModel(path, fingerprint);
+    std::vector<std::filesystem::path> files{path};
+    const auto add = [&](tg3_str uri) {
+        if (!uri.data || !uri.len || tg3_is_data_uri(uri.data, uri.len)) return;
+        const auto file = (path.parent_path() / PathFromUtf8(uri.data, uri.len)).lexically_normal();
+        if (!IsWithinRoot(file, path.parent_path()) || !std::filesystem::is_regular_file(file) ||
+            std::filesystem::file_size(file) > kMaxModelFileSize)
+            throw std::runtime_error("Missing or unsupported external model dependency");
+        if (std::find(files.begin(), files.end(), file) == files.end()) files.push_back(file);
+    };
+    for (uint32_t i = 0; i < model->buffers_count; ++i) add(model->buffers[i].uri);
+    for (uint32_t i = 0; i < model->images_count; ++i) add(model->images[i].uri);
+    return files;
+}
+
 uint32_t ModelImporter::LoadAsset(Scene& scene, const std::filesystem::path& path,
     const std::string& savedId, const std::string& expectedFingerprint)
 {

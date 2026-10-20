@@ -3,6 +3,7 @@
 #include "scene/MaterialLibrary.h"
 #include "scene/RenderSnapshot.h"
 #include "core/ScopeExit.h"
+#include "core/Profiling.h"
 #include "scene/Vertex.h"
 
 #include <imgui.h>
@@ -108,6 +109,12 @@ void OpenGLRenderer::Init(GLFWwindow* window)
     m_versionString = GlStringOrUnknown(m_gl.glGetString(GL_VERSION));
     m_rendererName = GlStringOrUnknown(m_gl.glGetString(GL_RENDERER));
 
+    m_deviceInfo = {"opengl", m_rendererName, m_configuration.uncapped ? "swap-interval-0-requested" : "driver-default",
+        false, m_configuration.transport, false};
+    if (m_configuration.uncapped) glfwSwapInterval(0);
+    if (m_configuration.transport)
+        for (auto& slot : m_timings) m_gl.glGenQueries(5, slot.queries.data());
+
     // 说明 Vulkan 后端在这里的管线对象内部表示是全局的。
     // 深度测试和剔除只需启用一次并保持启用；在 Vulkan 中，它们已经被烘焙进管线，不会在绘制时被忘记。
     m_gl.glEnable(GL_DEPTH_TEST);
@@ -170,6 +177,10 @@ void OpenGLRenderer::Init(GLFWwindow* window)
 void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     const std::function<void()>& drawEditorUi)
 {
+    ZoneScopedN("OpenGL.DrawFrameIncludingWaits");
+    const auto renderStart = ProfileClock::now();
+    m_metrics = {}; m_metrics.frame = ++m_frameSequence;
+    ScopeExit renderTimer([&] { m_metrics.renderCpuMs = ProfileMilliseconds(renderStart); });
     // 热重载，每个后端按自己的方式引擎特性的实现。
     if (m_textureWatch.ConsumeChanged()) {
         ReloadTexture();
@@ -202,6 +213,8 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     }
     if (m_viewportImage.Valid()) {
         UpdateCameraUniforms(snapshot);
+        BeginTiming();
+        Timestamp(0);
 
         // Render the opaque scene from the directional light into a fixed-size depth map.
         m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFramebuffer);
@@ -218,9 +231,11 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
                 glm::value_ptr(item.worldTransform));
             m_gl.glBindVertexArray(mesh.vertexArray);
             m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_SHORT, nullptr);
+            if (m_configuration.transport) { ++m_metrics.shadowDraws; m_metrics.shadowTriangles += mesh.indexCount / 3; }
         }
         m_gl.glBindVertexArray(0);
         m_gl.glUseProgram(0);
+        Timestamp(1);
         m_gl.glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFramebuffer);
         m_gl.glViewport(0, 0, m_hdrWidth, m_hdrHeight);
         m_gl.glClearColor(0.05f, 0.06f, 0.09f, 0.0f);
@@ -267,11 +282,13 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
             m_gl.glBindVertexArray(mesh.vertexArray);
             m_gl.glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount),
                 GL_UNSIGNED_SHORT, nullptr);
+            if (m_configuration.transport) { ++m_metrics.sceneDraws; m_metrics.sceneTriangles += mesh.indexCount / 3; }
         }
 
         m_gl.glBindVertexArray(0);
         m_gl.glUseProgram(0);
 
+        Timestamp(2);
         // 恢复默认绕序，避免最后一个镜像 draw 把全屏三角形也剔除。
         m_gl.glFrontFace(GL_CCW);
         // Tone-map 到 sRGB LDR 纹理；ImGui 采样自动解码，窗口写入再次编码。
@@ -288,6 +305,7 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
         m_gl.glBindVertexArray(0);
         m_gl.glUseProgram(0);
         m_gl.glEnable(GL_DEPTH_TEST);
+        Timestamp(3);
 
     }
     // 窗口只呈现编辑器；场景已成为普通 Image，不再覆盖整窗背景。
@@ -306,7 +324,15 @@ void OpenGLRenderer::DrawFrame(const RenderSnapshot& snapshot,
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-    glfwSwapBuffers(m_window);
+    Timestamp(4);
+    if (m_timing) { m_timing->pending = true; m_timing = nullptr; }
+    {
+        ZoneScopedN("OpenGL.Present");
+        const auto start = ProfileClock::now();
+        glfwSwapBuffers(m_window);
+        m_metrics.presentMs = ProfileMilliseconds(start);
+    }
+    m_metrics.submitted = m_viewportImage.Valid();
 }
 
 void OpenGLRenderer::WaitIdle()
@@ -325,6 +351,11 @@ void OpenGLRenderer::Cleanup()
     // Init 可能在入口点加载时失败，此时没有 GPU 对象可释放，也不能调用空函数指针。
     if (!m_glLoaded) return;
 
+    for (auto& slot : m_timings) {
+        if (slot.queries[0]) m_gl.glDeleteQueries(5, slot.queries.data());
+        slot = {};
+    }
+    m_timing = nullptr;
     DestroyTexture();
     DestroyMaterialTextures();
     m_gl.glDeleteTextures(1, &m_flatNormalTexture);
@@ -859,7 +890,9 @@ void OpenGLRenderer::InitImGui()
     m_imguiContextCreated = true;
 
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+    // EditorLayout 通过内存接口加载/保存，避免隐式读取工作目录中的旧 imgui.ini。
+    io.IniFilename = nullptr;
     // Image 不抢 ActiveId；窗口只能从标题栏移动，避免场景点击/操纵轴带动整个面板。
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
@@ -892,10 +925,12 @@ void OpenGLRenderer::ShutdownImGui()
 
 void OpenGLRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
 {
-    ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(340.0f, 0.0f), ImGuiCond_FirstUseEver);
+    // 共享编辑器先提交 DockSpace；诊断面板随后参与同一布局。
+    drawEditorUi();
+    if (m_configuration.transport) return;
 
-    ImGui::Begin("Renderer Diagnostics - OpenGL");
+    ImGui::Begin("Renderer Diagnostics", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted("OpenGL");
 
     const ImGuiIO& io = ImGui::GetIO();
     if (io.Framerate > 0.0f) {
@@ -918,5 +953,31 @@ void OpenGLRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
 
     ImGui::End();
 
-    drawEditorUi();
+}
+
+void OpenGLRenderer::BeginTiming()
+{
+    m_timing = nullptr;
+    if (!m_configuration.transport) return;
+    for (auto& slot : m_timings) {
+        if (slot.pending) {
+            GLint ready = GL_FALSE;
+            m_gl.glGetQueryObjectiv(slot.queries[4], GL_QUERY_RESULT_AVAILABLE, &ready);
+            if (ready) {
+                std::array<GLuint64,5> ticks{};
+                for (uint32_t i = 0; i < 5; ++i)
+                    m_gl.glGetQueryObjectui64v(slot.queries[i], GL_QUERY_RESULT, &ticks[i]);
+                m_gpuSamples.push_back({slot.frame, double(ticks[1]-ticks[0])/1e6,
+                    double(ticks[2]-ticks[1])/1e6, double(ticks[3]-ticks[2])/1e6, double(ticks[4]-ticks[3])/1e6});
+                slot.pending = false;
+            }
+        }
+        if (!slot.pending && !m_timing) m_timing = &slot;
+    }
+    if (m_timing) m_timing->frame = m_metrics.frame;
+    else ++m_skippedGpuSamples; // Keep drawing; never wait to get a measurement slot.
+}
+void OpenGLRenderer::Timestamp(uint32_t marker)
+{
+    if (m_timing) m_gl.glQueryCounter(m_timing->queries[marker], GL_TIMESTAMP);
 }
