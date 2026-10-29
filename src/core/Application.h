@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "core/LayerStack.h"
+#include "core/ProjectInfo.h"
 #include <memory>
 
 class Renderer;
@@ -12,12 +13,11 @@ struct GLFWwindow;
 struct ApplicationSpecification
 {
     int width = 720, height = 440;
-    const char* title = "Engine";
-    bool visible = true; // 隐藏窗口仅供生命周期检查，默认启动行为不变。
-    bool pixelSizedWindow = false; // Disable automatic monitor scaling for benchmark pixels.
+    const char* title = ProjectInfo::Name;
+    bool pixelSizedWindow = false; // 展示窗口使用指定像素尺寸，不随显示器缩放。
 };
 
-// 单线程、单窗口；无全局实例。Renderer 注入让应用生命周期可用无 GPU 的替身验证。
+// 单线程、单窗口；应用拥有传入的 Renderer，不依赖全局实例。
 class Application
 {
 public:
@@ -48,5 +48,4 @@ private:
     bool m_rendererInitAttempted = false;
     bool m_rendererReady = false;
     bool m_running = false;
-    bool m_hasRun = false;
 };

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -34,7 +34,7 @@ struct PushConstants
 {
 	glm::mat4 model;
 	glm::vec4 tint;
-	glm::vec4 material;
+	glm::vec4 material; // metallic, roughness, reserved, normalScale
 	glm::vec3 emissive;
     alignas(16) glm::vec4 normalInfo;
 };
@@ -55,7 +55,7 @@ struct UniformBufferObject {
 	glm::mat4 inverseViewProjection;
 	glm::vec4 environment;
 	glm::vec4 lightingTerms;
-	glm::vec4 framebufferSize; // 场景离屏像素尺寸；供 tone-map 的背景射线使用。
+	glm::vec4 framebufferSize; // width, height, reserved, reserved
 };
 static_assert(offsetof(UniformBufferObject, environment) == 304 && sizeof(UniformBufferObject) == 352,
     "environment camera UBO must match std140 shader offsets");
@@ -95,13 +95,6 @@ public:
 	
 private:
 
-    VkQueryPool m_timestampPool = VK_NULL_HANDLE;
-    std::array<uint64_t,kMaxFramesInFlight> m_timestampFrames{};
-    float m_timestampPeriod = 0;
-    uint32_t m_timestampBits = 0;
-    void CreateTimingQueries();
-    void ReadTimingQueries();
-    void Timestamp(VkCommandBuffer buffer, uint32_t marker);
     // one-time initialisation
 	void CreateInstance();
 	void SetupDebugMessenger();
@@ -190,7 +183,7 @@ private:
 	void UploadToDeviceLocal(const void* source, VkDeviceSize size,
 		VkBufferUsageFlags usage,
 		VkBuffer& buffer, VmaAllocation& allocation);
-	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation, uint32_t arrayLayers = 1, VkImageCreateFlags flags = 0);
+	void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation, uint32_t arrayLayers = 1, VkImageCreateFlags flags = 0, VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags,
 		uint32_t mipLevels, bool cube = false) const;
 	void TransitionImageLayout(VkCommandBuffer commandBuffer, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t baseMipLevel, uint32_t levelCount, uint32_t layerCount = 1) const;
@@ -232,6 +225,9 @@ private:
     // 离屏渲染所需
     struct ViewportTarget
     {
+        VkImage msaa = VK_NULL_HANDLE;
+        VmaAllocation msaaAllocation = nullptr;
+        VkImageView msaaView = VK_NULL_HANDLE;
         VkImage hdr = VK_NULL_HANDLE, depth = VK_NULL_HANDLE, ldr = VK_NULL_HANDLE;
         VmaAllocation hdrAllocation = nullptr, depthAllocation = nullptr, ldrAllocation = nullptr;
         VkImageView hdrView = VK_NULL_HANDLE, depthView = VK_NULL_HANDLE, ldrView = VK_NULL_HANDLE;
@@ -247,6 +243,7 @@ private:
     ViewportExtent m_viewportExtent{}, m_failedViewportExtent{};
     ViewportImage m_viewportImage;
     std::string m_viewportStatus;
+    VkSampleCountFlagBits m_msaaSamples = VK_SAMPLE_COUNT_1_BIT;
     VkFormat m_hdrFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_ldrFormat = VK_FORMAT_R8G8B8A8_SRGB;
     VkRenderPass m_uiRenderPass = VK_NULL_HANDLE;

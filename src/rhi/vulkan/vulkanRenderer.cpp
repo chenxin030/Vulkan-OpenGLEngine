@@ -1,8 +1,8 @@
-﻿#include "vulkanRenderer.h"
+#include "vulkanRenderer.h"
 
 #include "scene/RenderSnapshot.h"
 #include "core/ScopeExit.h"
-#include "core/Profiling.h"
+#include "core/ProjectInfo.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -26,7 +26,7 @@
 
 std::string TextureAssetPath()
 {
-    return std::string(ASSET_DIR) + "/checkerboard.ppm";
+    return std::string(ASSET_DIR) + "/textures/checkerboard.ppm";
 }
 
 namespace {
@@ -111,7 +111,6 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateSurface();
     PickPhysicalDevice();
     CreateLogicalDevice();
-    CreateTimingQueries();
 
     CreateAllocator();
 
@@ -119,11 +118,27 @@ void VulkanRenderer::Init(GLFWwindow* window) {
     CreateImageViews();
     m_hdrFormat = FindSupportedFormat(
         {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT},
-        VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+        VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
     m_ldrFormat = FindSupportedFormat({VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB},
         VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
 
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &deviceProperties);
+    VkSampleCountFlags supported = deviceProperties.limits.framebufferColorSampleCounts &
+        deviceProperties.limits.framebufferDepthSampleCounts;
+    for (const auto format : {m_hdrFormat, FindDepthFormat()}) {
+        VkImageFormatProperties imageProperties{};
+        const auto usage = format == m_hdrFormat ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (vkGetPhysicalDeviceImageFormatProperties(m_physicalDevice, format, VK_IMAGE_TYPE_2D,
+            VK_IMAGE_TILING_OPTIMAL, usage, 0, &imageProperties) != VK_SUCCESS)
+            throw std::runtime_error("failed to query MSAA image support");
+        supported &= imageProperties.sampleCounts;
+    }
+    m_msaaSamples = (supported & VK_SAMPLE_COUNT_4_BIT) ? VK_SAMPLE_COUNT_4_BIT :
+        ((supported & VK_SAMPLE_COUNT_2_BIT) ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT);
+    std::cout << "[MSAA] Vulkan: " << uint32_t(m_msaaSamples) << "x" << std::endl;
     CreateCommandPool();
     CreateCommandBuffers();
 
@@ -163,9 +178,6 @@ void VulkanRenderer::Cleanup() {
     m_inFlightFences.clear();
     // m_renderFinishedSemaphores 属于交换链，会在下面的 CleanupSwapChain() 中释放。
 
-    if (m_timestampPool != VK_NULL_HANDLE) {
-        vkDestroyQueryPool(m_device, m_timestampPool, nullptr); m_timestampPool = VK_NULL_HANDLE;
-    }
     if (m_commandPool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(m_device, m_commandPool, nullptr);
         m_commandPool = VK_NULL_HANDLE;
@@ -246,10 +258,6 @@ void VulkanRenderer::WaitIdle()
 void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     const std::function<void()>& drawEditorUi) {
 
-    ZoneScopedN("Vulkan.DrawFrameIncludingWaits");
-    const auto renderStart = ProfileClock::now();
-    m_metrics = {}; m_metrics.frame = ++m_frameSequence;
-    ScopeExit renderTimer([&] { m_metrics.renderCpuMs = ProfileMilliseconds(renderStart); });
     // 轮询帧缓冲区大小而不是使用调整大小回调可以减少动用的部分，而且还能自动处理 DPI 变化。
     int width = 0;
     int height = 0;
@@ -278,22 +286,14 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     if (m_viewportRequest.visible && m_viewportRequest.extent.Valid() && m_viewportExtent.Valid())
         m_viewportImage = {uint64_t(m_viewportTargets[m_currentFrame].imguiSet), m_viewportExtent,
             {0, 0}, {1, 1}, m_viewportStatus};
-    {
-        ZoneScopedN("Vulkan.FenceWait");
-        const auto start = ProfileClock::now();
-        vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
-        m_metrics.fenceMs = ProfileMilliseconds(start);
-    }
-    ReadTimingQueries();
+    vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
     EnsureMaterialTexturesUploaded(*snapshot.materials);
     EnsureEnvironmentUploaded(snapshot.environmentData ? snapshot.environmentData : FallbackEnvironment());
 
     uint32_t imageIndex = 0;
-    const auto acquireStart = ProfileClock::now();
     VkResult result = vkAcquireNextImageKHR(m_device, m_swapChain, UINT64_MAX,
         m_imageAvailableSemaphores[m_currentFrame],
         VK_NULL_HANDLE, &imageIndex);
-    m_metrics.acquireMs = ProfileMilliseconds(acquireStart);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         RecreateSwapChain();
@@ -350,13 +350,7 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
     presentInfo.pSwapchains = swapChains;
     presentInfo.pImageIndices = &imageIndex;
 
-    {
-        ZoneScopedN("Vulkan.Present");
-        const auto start = ProfileClock::now();
-        result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
-        m_metrics.presentMs = ProfileMilliseconds(start);
-    }
-    m_metrics.submitted = m_viewportImage.Valid();
+    result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         RecreateSwapChain();
@@ -371,9 +365,9 @@ void VulkanRenderer::DrawFrame(const RenderSnapshot& snapshot,
 void VulkanRenderer::CreateInstance() {
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "Engine";
+    appInfo.pApplicationName = ProjectInfo::Name;
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.pEngineName = "Engine";
+    appInfo.pEngineName = ProjectInfo::Name;
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.apiVersion = VK_API_VERSION_1_2;
 
@@ -448,15 +442,14 @@ bool VulkanRenderer::CheckValidationLayerSupport() {
 }
 
 void VulkanRenderer::SetupDebugMessenger() {
-#ifdef NDEBUG
-    return;
-#endif
+#ifndef NDEBUG
     VkDebugUtilsMessengerCreateInfoEXT createInfo;
     PopulateDebugMessengerCreateInfo(createInfo);
 
     if (CreateDebugUtilsMessengerEXT(m_instance, &createInfo, nullptr, &m_debugMessenger) != VK_SUCCESS) {
         throw std::runtime_error("failed to set up debug messenger!");
     }
+#endif
 }
 
 void VulkanRenderer::CreateSurface()
@@ -551,10 +544,6 @@ void VulkanRenderer::CreateLogicalDevice() {
 
 void VulkanRenderer::CreateSwapChain() {
     const SwapChainSupportDetails support = QuerySwapChainSupport(m_physicalDevice);
-    const auto selectedPresentMode = ChooseSwapPresentMode(support.presentModes);
-    m_deviceInfo.presentMode = selectedPresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" :
-        selectedPresentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo";
-    m_deviceInfo.presentationLimited = m_configuration.uncapped && selectedPresentMode != VK_PRESENT_MODE_IMMEDIATE_KHR;
 
     VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(support.formats);
     VkPresentModeKHR presentMode = ChooseSwapPresentMode(support.presentModes);
@@ -873,19 +862,13 @@ void VulkanRenderer::CreateDescriptorPool()
 
 void VulkanRenderer::CreateToneMapDescriptorSetLayout()
 {
-    VkDescriptorSetLayoutBinding inputBinding{};
-    inputBinding.binding = 0;
-    inputBinding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-    inputBinding.descriptorCount = 1;
-    inputBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &inputBinding;
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr,
-        &m_toneMapDescriptorSetLayout) != VK_SUCCESS)
+    VkDescriptorSetLayoutBinding binding{};
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    binding.descriptorCount = 1; binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    info.bindingCount = 1; info.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_toneMapDescriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create tone-map descriptor layout");
-
 }
 
 void VulkanRenderer::CreateDescriptorSets() 
@@ -1141,9 +1124,7 @@ VkSurfaceFormatKHR VulkanRenderer::ChooseSwapSurfaceFormat(const std::vector<VkS
 VkPresentModeKHR VulkanRenderer::ChooseSwapPresentMode(
     const std::vector<VkPresentModeKHR>& availablePresentModes) const
 {
-    if (m_configuration.uncapped)
-        for (const auto mode : availablePresentModes) if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) return mode;
-    // Mailbox / FIFO remain available when immediate presentation is unsupported.
+    // 优先 Mailbox，不支持时使用规范保证可用的 FIFO。
     for (const VkPresentModeKHR availablePresentMode : availablePresentModes) {
         if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
             return availablePresentMode;
@@ -1229,6 +1210,8 @@ void VulkanRenderer::DestroyViewportTargets(ViewportTargets& targets)
         if (target.toneSet && m_descriptorPool)
             vkFreeDescriptorSets(m_device, m_descriptorPool, 1, &target.toneSet);
         if (target.framebuffer) vkDestroyFramebuffer(m_device, target.framebuffer, nullptr);
+        if (target.msaaView) vkDestroyImageView(m_device, target.msaaView, nullptr);
+        if (target.msaa) vmaDestroyImage(m_allocator, target.msaa, target.msaaAllocation);
         if (target.sampler) vkDestroySampler(m_device, target.sampler, nullptr);
         if (target.ldrView) vkDestroyImageView(m_device, target.ldrView, nullptr);
         if (target.hdrView) vkDestroyImageView(m_device, target.hdrView, nullptr);
@@ -1266,19 +1249,25 @@ void VulkanRenderer::EnsureViewportTargets()
     try {
         for (auto& target : candidate) {
             CreateImage(wanted.width, wanted.height, 1, m_hdrFormat, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (m_msaaSamples == VK_SAMPLE_COUNT_1_BIT ? VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT : 0),
+                target.msaa, target.msaaAllocation, 1, 0, m_msaaSamples);
+            target.msaaView = CreateImageView(target.msaa, m_hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            CreateImage(wanted.width, wanted.height, 1, m_hdrFormat, VK_IMAGE_TILING_OPTIMAL,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
                 target.hdr, target.hdrAllocation);
             target.hdrView = CreateImageView(target.hdr, m_hdrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 
             const VkFormat depthFormat = FindDepthFormat();
             CreateImage(wanted.width, wanted.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL,
-                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depthAllocation);
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, target.depth, target.depthAllocation, 1, 0, m_msaaSamples);
             target.depthView = CreateImageView(target.depth, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 
             CreateImage(wanted.width, wanted.height, 1, m_ldrFormat, VK_IMAGE_TILING_OPTIMAL,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                 target.ldr, target.ldrAllocation);
             target.ldrView = CreateImageView(target.ldr, m_ldrFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+
 
             VkSamplerCreateInfo sampler{}; 
             sampler.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1288,7 +1277,7 @@ void VulkanRenderer::EnsureViewportTargets()
             if (vkCreateSampler(m_device, &sampler, nullptr, &target.sampler) != VK_SUCCESS)
                 throw std::runtime_error("failed to create viewport sampler");
 
-            const std::array<VkImageView, 3> views{target.ldrView, target.hdrView, target.depthView};
+            const std::array<VkImageView, 4> views{target.ldrView, target.hdrView, target.depthView, target.msaaView};
 
             VkFramebufferCreateInfo framebuffer{}; framebuffer.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
             framebuffer.renderPass = m_renderPass; framebuffer.attachmentCount = uint32_t(views.size());
@@ -1303,12 +1292,12 @@ void VulkanRenderer::EnsureViewportTargets()
             if (vkAllocateDescriptorSets(m_device, &allocation, &target.toneSet) != VK_SUCCESS)
                 throw std::runtime_error("failed to allocate viewport tone-map descriptor");
 
-            VkDescriptorImageInfo hdr{}; hdr.imageView = target.hdrView;
-            hdr.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            VkWriteDescriptorSet write{}; write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            VkDescriptorImageInfo input{};
+            input.imageView = m_msaaSamples == VK_SAMPLE_COUNT_1_BIT ? target.msaaView : target.hdrView;
+            input.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             write.dstSet = target.toneSet; write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; write.pImageInfo = &hdr;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; write.pImageInfo = &input;
             vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
             target.imguiSet = ImGui_ImplVulkan_AddTexture(target.sampler, target.ldrView,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1569,7 +1558,6 @@ void VulkanRenderer::RecordShadowPass(VkCommandBuffer commandBuffer, const Rende
     scissor.extent = { kDirectionalShadowMapSize, kDirectionalShadowMapSize };
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
     for (const DrawItem& item : snapshot.drawItems) {
-        if (item.unlit) continue;
         const GpuMesh& mesh = m_meshes.at(item.meshIndex);
         const VkBuffer vertexBuffer = mesh.vertexBuffer;
         const VkDeviceSize offset = 0;
@@ -1578,7 +1566,6 @@ void VulkanRenderer::RecordShadowPass(VkCommandBuffer commandBuffer, const Rende
         vkCmdPushConstants(commandBuffer, m_shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
             0, sizeof(glm::mat4), &item.worldTransform);
         vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
-        if (m_configuration.transport) { ++m_metrics.shadowDraws; m_metrics.shadowTriangles += mesh.indexCount / 3; }
     }
     vkCmdEndRenderPass(commandBuffer);
 }
@@ -1608,7 +1595,7 @@ void VulkanRenderer::CreateGraphicsPipeline()
     const VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
     const VkVertexInputBindingDescription bindingDescription = VertexBindingDescription();
-    const std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions = VertexAttributeDescriptions();
+    const auto attributeDescriptions = VertexAttributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1641,7 +1628,7 @@ void VulkanRenderer::CreateGraphicsPipeline()
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisampling.sampleShadingEnable = VK_FALSE;
-    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisampling.rasterizationSamples = m_msaaSamples;
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -1769,6 +1756,7 @@ void VulkanRenderer::CreateToneMapPipeline()
     depth.depthTestEnable = VK_FALSE;
     depth.depthWriteEnable = VK_FALSE;
     VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.blendEnable = VK_FALSE;
     blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend{};
@@ -2371,11 +2359,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         throw std::runtime_error("failed to begin recording command buffer!");
     }
 
-    if (m_timestampPool) vkCmdResetQueryPool(commandBuffer, m_timestampPool, m_currentFrame * 5, 5);
-    Timestamp(commandBuffer, 0);
     if (m_viewportImage.Valid()) {
         RecordShadowPass(commandBuffer, snapshot);
-        Timestamp(commandBuffer, 1);
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2384,9 +2369,10 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
         renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = VkExtent2D{m_viewportExtent.width, m_viewportExtent.height};
 
-        std::array<VkClearValue, 3> clearValues{};
+        std::array<VkClearValue, 4> clearValues{};
+        clearValues[3].color = {{0, 0, 0, 0}};
         clearValues[0].color = { {0.05f, 0.06f, 0.09f, 1.0f} };
-        clearValues[1].color = { {0.05f, 0.06f, 0.09f, 0.0f} };
+        clearValues[1].color = {{0, 0, 0, 0}};
         clearValues[2].depthStencil = { 1.0f, 0 };
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());;
         renderPassInfo.pClearValues = clearValues.data();
@@ -2419,24 +2405,22 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
-            const VkBuffer vertexBuffers[] = { mesh.vertexBuffer };
-            const VkDeviceSize offsets[] = { 0 };
+            const VkBuffer vertexBuffers[] = {mesh.vertexBuffer};
+            const VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
             vkCmdBindIndexBuffer(commandBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
             const PushConstants push{ item.worldTransform, glm::vec4(item.tint, 1.0f),
-                glm::vec4(item.metallicFactor, item.roughnessFactor, item.unlit ? 1.0f : 0.0f, item.normalScale), item.emissive,
+                glm::vec4(item.metallicFactor, item.roughnessFactor, 0.0f, item.normalScale), item.emissive,
                 glm::vec4(snapshot.normalMapping && item.normalTextureIndex != UINT32_MAX ? 1.0f : 0.0f,
-                    float(snapshot.normalDebug), 0.0f, 0.0f) };
+                    float(snapshot.normalDebug), item.textureIndex != UINT32_MAX ? 1.0f : 0.0f, 0.0f) };
             vkCmdPushConstants(commandBuffer, m_pipelineLayout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(PushConstants), &push);
 
             vkCmdDrawIndexed(commandBuffer, mesh.indexCount, 1, 0, 0, 0);
-            if (m_configuration.transport) { ++m_metrics.sceneDraws; m_metrics.sceneTriangles += mesh.indexCount / 3; }
         }
 
-        Timestamp(commandBuffer, 2);
         vkCmdNextSubpass(commandBuffer, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_toneMapPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2449,7 +2433,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
         vkCmdEndRenderPass(commandBuffer);
     } // LDR 最终为 SHADER_READ_ONLY；离屏 pass 的 external dependency 保障 UI 采样。
-    Timestamp(commandBuffer, 3);
 
     VkRenderPassBeginInfo uiPass{};
     uiPass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2467,8 +2450,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
     }
 
     vkCmdEndRenderPass(commandBuffer);
-    Timestamp(commandBuffer, 4);
-    if (m_timestampPool) m_timestampFrames[m_currentFrame] = m_metrics.frame;
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
         throw std::runtime_error("failed to record command buffer!");
     }
@@ -2578,7 +2559,7 @@ void VulkanRenderer::BuildImGuiFrame(const std::function<void()>& drawEditorUi)
 {
     // 共享编辑器先提交 DockSpace；诊断面板随后参与同一布局。
     drawEditorUi();
-    if (m_configuration.transport) return;
+    if (!m_showDiagnostics) return;
 
     ImGui::Begin("Renderer Diagnostics", nullptr, ImGuiWindowFlags_NoFocusOnAppearing);
     ImGui::TextUnformatted("Vulkan");
@@ -2648,95 +2629,58 @@ VkFormat VulkanRenderer::FindDepthFormat() const
 
 void VulkanRenderer::CreateRenderPass()
 {
-    std::array<VkAttachmentDescription, 3> attachments{};
-    attachments[0].format = m_ldrFormat;
-    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    attachments[1].format = m_hdrFormat;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    attachments[2].format = FindDepthFormat();
-    attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference sceneColorRef{ 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    VkAttachmentReference sceneDepthRef{ 2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
-    VkAttachmentReference ldrColorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    VkAttachmentReference hdrInputRef{ 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    // LDR, resolved HDR, multisampled depth, multisampled HDR.
+    std::array<VkAttachmentDescription, 4> attachments{};
+    const std::array<VkFormat, 4> formats{m_ldrFormat, m_hdrFormat, FindDepthFormat(), m_hdrFormat};
+    for (uint32_t i = 0; i < attachments.size(); ++i) {
+        auto& attachment = attachments[i];
+        attachment.format = formats[i];
+        attachment.samples = i >= 2 ? m_msaaSamples : VK_SAMPLE_COUNT_1_BIT;
+        attachment.loadOp = i == 1 ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachment.storeOp = i == 0 ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachment.finalLayout = i == 2 ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
+            ((i == 3 && m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    const VkAttachmentReference sceneColor{3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference resolve{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference depth{2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference output{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference input{m_msaaSamples == VK_SAMPLE_COUNT_1_BIT ? 3u : 1u, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     std::array<VkSubpassDescription, 2> subpasses{};
     subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpasses[0].colorAttachmentCount = 1;
-    subpasses[0].pColorAttachments = &sceneColorRef;
-    subpasses[0].pDepthStencilAttachment = &sceneDepthRef;
+    subpasses[0].colorAttachmentCount = 1; subpasses[0].pColorAttachments = &sceneColor;
+    subpasses[0].pResolveAttachments = m_msaaSamples == VK_SAMPLE_COUNT_1_BIT ? nullptr : &resolve;
+    subpasses[0].pDepthStencilAttachment = &depth;
     subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpasses[1].colorAttachmentCount = 1;
-    subpasses[1].pColorAttachments = &ldrColorRef;
-    subpasses[1].inputAttachmentCount = 1;
-    subpasses[1].pInputAttachments = &hdrInputRef;
-
+    subpasses[1].colorAttachmentCount = 1; subpasses[1].pColorAttachments = &output;
+    subpasses[1].inputAttachmentCount = 1; subpasses[1].pInputAttachments = &input;
     std::array<VkSubpassDependency, 4> dependencies{};
-    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[0].dstSubpass = 0;
-    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
-    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dependencies[1].srcSubpass = 0;
-    dependencies[1].dstSubpass = 1;
-    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[1].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT |
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[2].srcSubpass = 1;
-    dependencies[2].dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependencies[2].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[2].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    // LDR 在 subpass 1 写入；复用前覆盖上次 UI 对此槽位的采样。
-    dependencies[3].srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependencies[3].dstSubpass = 1;
-    dependencies[3].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependencies[3].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependencies[3].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    dependencies[3].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    VkRenderPassCreateInfo renderPassInfo{};
-    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-    renderPassInfo.pAttachments = attachments.data();
-    renderPassInfo.subpassCount = static_cast<uint32_t>(subpasses.size());
-    renderPassInfo.pSubpasses = subpasses.data();
-    renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
-    renderPassInfo.pDependencies = dependencies.data();
-
-    if (vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass) != VK_SUCCESS) {
-        throw std::runtime_error("failed to create render pass!");
+    for (uint32_t i = 0; i < 2; ++i) {
+        dependencies[i].srcSubpass = VK_SUBPASS_EXTERNAL; dependencies[i].dstSubpass = i;
+        dependencies[i].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        dependencies[i].dstStageMask = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+        dependencies[i].srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        dependencies[i].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     }
+    dependencies[2].srcSubpass = 0; dependencies[2].dstSubpass = 1;
+    dependencies[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[2].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[2].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[3].srcSubpass = 1; dependencies[3].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[3].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[3].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[3].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[3].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    info.attachmentCount = uint32_t(attachments.size()); info.pAttachments = attachments.data();
+    info.subpassCount = uint32_t(subpasses.size()); info.pSubpasses = subpasses.data();
+    info.dependencyCount = uint32_t(dependencies.size()); info.pDependencies = dependencies.data();
+    if (vkCreateRenderPass(m_device, &info, nullptr, &m_renderPass) != VK_SUCCESS)
+        throw std::runtime_error("failed to create MSAA scene render pass");
 }
 
 void VulkanRenderer::CreateUiRenderPass()
@@ -2787,7 +2731,7 @@ void VulkanRenderer::UploadToDeviceLocal(const void* source, VkDeviceSize size,
     DestroyBuffer(stagingBuffer, stagingAllocation);
 }
 
-void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation, uint32_t arrayLayers, VkImageCreateFlags flags)
+void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImage& image, VmaAllocation& allocation, uint32_t arrayLayers, VkImageCreateFlags flags, VkSampleCountFlagBits samples)
 {
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -2802,7 +2746,7 @@ void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLe
     imageInfo.tiling = tiling;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = usage;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.samples = samples;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     // 这个引擎创建的图像都没有主机可见的用途。纹理是通过暂存缓冲区传入的，而深度缓冲区根本不会离开 GPU。
@@ -3049,45 +2993,3 @@ void VulkanRenderer::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
     vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
 }
 
-void VulkanRenderer::CreateTimingQueries()
-{
-    m_deviceInfo.backend = "vulkan"; m_deviceInfo.device = m_deviceName;
-#ifndef NDEBUG
-    m_deviceInfo.validation = true;
-#endif
-    if (!m_configuration.transport) return;
-    uint32_t count = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &count, nullptr);
-    std::vector<VkQueueFamilyProperties> families(count);
-    vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &count, families.data());
-    m_timestampBits = families.at(*FindQueueFamilies(m_physicalDevice).graphicsFamily).timestampValidBits;
-    if (!m_timestampBits) return;
-    VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
-    m_timestampPeriod = properties.limits.timestampPeriod;
-    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    info.queryType = VK_QUERY_TYPE_TIMESTAMP; info.queryCount = kMaxFramesInFlight * 5;
-    if (vkCreateQueryPool(m_device, &info, nullptr, &m_timestampPool) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create GPU timestamp queries");
-    m_deviceInfo.gpuTimestamps = true;
-}
-void VulkanRenderer::Timestamp(VkCommandBuffer buffer, uint32_t marker)
-{
-    if (m_timestampPool) vkCmdWriteTimestamp(buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        m_timestampPool, m_currentFrame * 5 + marker);
-}
-void VulkanRenderer::ReadTimingQueries()
-{
-    if (!m_timestampPool || !m_timestampFrames[m_currentFrame]) return;
-    std::array<uint64_t,5> ticks{};
-    // Read only after the normal frame-slot fence. No additional waits or WAIT_BIT.
-    const auto result = vkGetQueryPoolResults(m_device, m_timestampPool, m_currentFrame * 5, 5,
-        sizeof(ticks), ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-    if (result == VK_SUCCESS) {
-        const uint64_t mask = m_timestampBits == 64 ? UINT64_MAX : (uint64_t(1) << m_timestampBits) - 1;
-        const auto ms = [&](int a, int b) { return double((ticks[b] - ticks[a]) & mask) * m_timestampPeriod / 1e6; };
-        m_gpuSamples.push_back({m_timestampFrames[m_currentFrame], ms(0,1), ms(1,2), ms(2,3), ms(3,4)});
-    } else if (result == VK_NOT_READY) ++m_skippedGpuSamples;
-    else throw std::runtime_error("Failed reading GPU timestamp queries");
-    m_timestampFrames[m_currentFrame] = 0;
-}

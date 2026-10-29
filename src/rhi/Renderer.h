@@ -1,8 +1,6 @@
 ﻿#pragma once
 
 #include <functional>
-#include "rhi/RenderMetrics.h"
-#include <utility>
 #include "rhi/Viewport.h"
 
 struct GLFWwindow;
@@ -19,26 +17,19 @@ public:
 
 	virtual void ConfigureWindowHints() const = 0;
 	virtual void Init(GLFWwindow* window) = 0;
+
 	// 同步消费快照和回调，不保存其中引用。跳帧允许不调用 UI；实际 ImGui 帧只调用一次。
 	virtual void DrawFrame(const RenderSnapshot& snapshot,
 		const std::function<void()>& drawEditorUi) = 0;
+
 	// 设置下一次 DrawFrame 的请求；Image 仅在该帧 UI 回调期间借用。
 	void SetViewportRequest(ViewportRequest request) { m_viewportRequest = request; }
+
 	virtual ViewportImage GetViewportImage() const { return {}; }
 	virtual void WaitIdle() = 0;
-	// Application 在正常退出时先 WaitIdle；Cleanup 也必须支持 Init 中途失败及重复调用。
 	virtual void Cleanup() = 0;
-    // Set before Init. Shared runtime policy; GPU ownership stays in each backend.
-    void Configure(RenderConfiguration config) { m_configuration = config; }
-    const RenderMetrics& Metrics() const { return m_metrics; }
-    const RenderDeviceInfo& DeviceInfo() const { return m_deviceInfo; }
-    std::vector<GpuSample> TakeGpuSamples() { return std::exchange(m_gpuSamples, {}); }
-    uint64_t SkippedGpuSamples() const { return m_skippedGpuSamples; }
+    void ShowDiagnostics(bool visible) { m_showDiagnostics = visible; }
 protected:
-    RenderConfiguration m_configuration;
-    RenderMetrics m_metrics;
-    RenderDeviceInfo m_deviceInfo;
-    std::vector<GpuSample> m_gpuSamples;
-    uint64_t m_frameSequence = 0, m_skippedGpuSamples = 0;
+    bool m_showDiagnostics = true;
 	ViewportRequest m_viewportRequest;
 };

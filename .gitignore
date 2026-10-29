@@ -29,6 +29,7 @@ CMakeUserPresets.json
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
+*.pdb
 
 # ---------------------------------------------------------------------------
 # 编译后的 shader（D4 / D6 之后才会出现）

@@ -3,7 +3,7 @@
 uniform sampler2D uTexture;
 uniform sampler2D uShadowMap;
 uniform vec4 uMaterial;
-uniform vec3 uNormalInfo; // enabled, debug mode, reserved
+uniform vec3 uNormalInfo; // normal enabled, debug mode, base color texture enabled
 uniform sampler2D uNormalMap;
 uniform vec3 uEmissive;
 
@@ -37,8 +37,7 @@ layout(binding = 5) uniform sampler2D brdfLut;
 
 void main()
 {
-    vec3 albedo = fragColor * texture(uTexture, fragTexCoord).rgb;
-    if (uMaterial.z > 0.5) { outColor = vec4(albedo, 1.0); return; }
+    vec3 albedo = fragColor * (uNormalInfo.z > 0.5 ? texture(uTexture, fragTexCoord).rgb : vec3(1.0));
     const float PI = 3.14159265359;
     vec3 Nbase = normalize(fragWorldNormal);
     vec3 N = Nbase;
@@ -85,6 +84,16 @@ void main()
     // GLM is configured for zero-to-one projection depth; OpenGL's viewport maps that
     // clip depth into its [0,1] depth attachment with the usual half-scale transform.
     vec3 shadowCoord = vec3(shadowNdc.xy * 0.5 + 0.5, shadowNdc.z * 0.5 + 0.5);
+    // Compute derivatives before the bounds branch: neighbouring fragments may
+    // straddle the shadow frustum. Predict receiver depth at each sampled texel.
+    vec3 shadowDx = dFdx(shadowCoord);
+    vec3 shadowDy = dFdy(shadowCoord);
+    float jacobian = shadowDx.x * shadowDy.y - shadowDx.y * shadowDy.x;
+    vec2 receiverSlope = vec2(0.0);
+    if (abs(jacobian) > 1e-12) {
+        receiverSlope = vec2(shadowDy.y * shadowDx.z - shadowDx.y * shadowDy.z,
+            shadowDx.x * shadowDy.z - shadowDy.x * shadowDx.z) / jacobian;
+    }
     float visibility = 1.0;
     if (all(greaterThanEqual(shadowCoord, vec3(0.0))) &&
         all(lessThanEqual(shadowCoord, vec3(1.0)))) {
@@ -94,8 +103,11 @@ void main()
         visibility = 0.0;
         for (int y = -1; y <= 1; ++y)
             for (int x = -1; x <= 1; ++x) {
-                float storedDepth = texture(uShadowMap, shadowCoord.xy + vec2(x, y) * texel).r;
-                visibility += shadowCoord.z - bias <= storedDepth ? 1.0 : 0.0;
+                vec2 sampleUv = shadowCoord.xy + vec2(x, y) * texel;
+                vec2 sampleCenter = (floor(sampleUv / texel) + 0.5) * texel;
+                float receiverDepth = shadowCoord.z + dot(receiverSlope, sampleCenter - shadowCoord.xy);
+                float storedDepth = texture(uShadowMap, sampleUv).r;
+                visibility += receiverDepth - bias <= storedDepth ? 1.0 : 0.0;
             }
         visibility /= 9.0;
     }

@@ -21,7 +21,6 @@
 #include <memory>
 #include <numeric>
 #include <optional>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -790,7 +789,8 @@ std::vector<Entity> ModelImporter::Import(Scene& scene, const std::filesystem::p
     return InstantiateAsset(scene, LoadAsset(scene, path));
 }
 
-std::vector<Entity> ModelImporter::InstantiateAsset(Scene& scene, uint32_t assetIndex)
+std::vector<Entity> ModelImporter::InstantiateAsset(Scene& scene, uint32_t assetIndex,
+    std::vector<Entity>* completeInstance)
 {
     if (assetIndex >= scene.modelAssets.size())
         throw std::runtime_error("model asset index is out of range");
@@ -801,6 +801,7 @@ std::vector<Entity> ModelImporter::InstantiateAsset(Scene& scene, uint32_t asset
     scene.registry.Add<Transform>(instanceRoot);
     const auto sourcePath = PathFromUtf8(asset.sourcePath.data(), asset.sourcePath.size());
     scene.registry.Add<Name>(instanceRoot, Name{ PathUtf8(sourcePath.stem()) + " Instance" });
+    if (completeInstance) { completeInstance->clear(); completeInstance->push_back(instanceRoot); }
 
     std::vector<Entity> entities;
     uint32_t maximumNode = 0;
@@ -812,6 +813,7 @@ std::vector<Entity> ModelImporter::InstantiateAsset(Scene& scene, uint32_t asset
     // 先序准备好的节点，所以每个父节点的 Entity 已经创建好了。
     for (const NodeRef& ref : asset.nodes) {
         const Entity entity = scene.registry.Create();
+        if (completeInstance) completeInstance->push_back(entity);
         entities[ref.sourceIndex] = entity;
         created[ref.sourceIndex] = 1;
 
@@ -830,6 +832,7 @@ std::vector<Entity> ModelImporter::InstantiateAsset(Scene& scene, uint32_t asset
 
         for (const PrimitiveRef& primitive : ref.primitives) {
             const Entity part = scene.registry.Create();
+            if (completeInstance) completeInstance->push_back(part);
             Transform partTransform;
             partTransform.world = partTransform.local;
             scene.registry.Add<Transform>(part, partTransform);

@@ -1,9 +1,10 @@
-﻿#pragma once
+#pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
 #include "Camera.h"
 #include "scene/Registry.h"
+#include "scene/SceneSystemConfig.h"
 #include "MeshLibrary.h"
 #include "MaterialLibrary.h"
 #include "ModelAsset.h"
@@ -13,7 +14,9 @@
 
 struct Scene
 {
+    bool industrialRuntimeOnly = false; // safety boundary: never serialize a live pool
     Registry registry;
+    std::vector<SceneSystemKind> systems; // 显式运行配置；实例归 SceneRuntime 所有。
     Camera camera;
     EnvironmentSettings environment;
     std::shared_ptr<const EnvironmentData> environmentData;
@@ -57,5 +60,3 @@ private:
 
 };
 
-Scene BuildDemoScene();
-Scene BuildDemo2DScene();

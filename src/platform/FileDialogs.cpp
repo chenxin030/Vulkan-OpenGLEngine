@@ -26,13 +26,12 @@ std::optional<std::filesystem::path> Pick(const std::filesystem::path& directory
     options.lpstrInitialDir = directory.c_str();
     options.lpstrTitle = title;
     options.lpstrDefExt = save ? L"scene.json" : nullptr;
-    // 原生对话框不能改变引擎的 cwd，否则 HDR/已有场景相对路径会漂移。
     options.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
         (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save ? GetSaveFileNameW(&options) : GetOpenFileNameW(&options)) return std::filesystem::path(file.data());
     if (const DWORD error = CommDlgExtendedError(); error != 0)
         throw std::runtime_error("File dialog failed: " + std::to_string(error));
-    return std::nullopt; // Cancel 不是错误。
+    return std::nullopt;
 }
 }
 #endif

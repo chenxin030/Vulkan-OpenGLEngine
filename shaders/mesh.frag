@@ -25,7 +25,7 @@ layout(push_constant) uniform PushConstants
     vec4 tint;
     vec4 material;
     vec3 emissive;
-    layout(offset = 112) vec4 normalInfo; // enabled, debug mode, reserved
+    layout(offset = 112) vec4 normalInfo; // normal enabled, debug mode, base color texture enabled
 } push;
 
 layout(location = 0) in vec3 fragColor;
@@ -43,8 +43,7 @@ layout(set = 1, binding = 3) uniform sampler2D brdfLut;
 
 void main()
 {
-    vec3 albedo = fragColor * texture(texSampler, fragTexCoord).rgb;
-    if (push.material.z > 0.5) { outColor = vec4(albedo, 1.0); return; }
+    vec3 albedo = fragColor * (push.normalInfo.z > 0.5 ? texture(texSampler, fragTexCoord).rgb : vec3(1.0));
     const float PI = 3.14159265359;
     vec3 Nbase = normalize(fragWorldNormal);
     vec3 N = Nbase;
@@ -89,6 +88,16 @@ void main()
     vec3 diffuse = (1.0 - F) * (1.0 - metallic) * albedo / PI;
     vec3 shadowNdc = fragLightSpacePosition.xyz / fragLightSpacePosition.w;
     vec3 shadowCoord = vec3(shadowNdc.xy * 0.5 + 0.5, shadowNdc.z);
+    // Compute derivatives before the bounds branch: neighbouring fragments may
+    // straddle the shadow frustum. Predict receiver depth at each sampled texel.
+    vec3 shadowDx = dFdx(shadowCoord);
+    vec3 shadowDy = dFdy(shadowCoord);
+    float jacobian = shadowDx.x * shadowDy.y - shadowDx.y * shadowDy.x;
+    vec2 receiverSlope = vec2(0.0);
+    if (abs(jacobian) > 1e-12) {
+        receiverSlope = vec2(shadowDy.y * shadowDx.z - shadowDx.y * shadowDy.z,
+            shadowDx.x * shadowDy.z - shadowDy.x * shadowDx.z) / jacobian;
+    }
     float visibility = 1.0;
     if (all(greaterThanEqual(shadowCoord, vec3(0.0))) &&
         all(lessThanEqual(shadowCoord, vec3(1.0)))) {
@@ -98,8 +107,11 @@ void main()
         visibility = 0.0;
         for (int y = -1; y <= 1; ++y)
             for (int x = -1; x <= 1; ++x) {
-                float storedDepth = texture(shadowSampler, shadowCoord.xy + vec2(x, y) * texel).r;
-                visibility += shadowCoord.z - bias <= storedDepth ? 1.0 : 0.0;
+                vec2 sampleUv = shadowCoord.xy + vec2(x, y) * texel;
+                vec2 sampleCenter = (floor(sampleUv / texel) + 0.5) * texel;
+                float receiverDepth = shadowCoord.z + dot(receiverSlope, sampleCenter - shadowCoord.xy);
+                float storedDepth = texture(shadowSampler, sampleUv).r;
+                visibility += receiverDepth - bias <= storedDepth ? 1.0 : 0.0;
             }
         visibility /= 9.0;
     }

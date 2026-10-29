@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "scene/Vertex.h"
 
@@ -21,8 +21,7 @@ public:
     static constexpr uint32_t kPyramid = 1;
     static constexpr uint32_t kPlane = 2;
     static constexpr uint32_t kCylinder = 3;
-    static constexpr uint32_t kQuad = 4;
-    static constexpr uint32_t kBuiltinCount = 5;
+    static constexpr uint32_t kBuiltinCount = 4;
 
     MeshLibrary();
 

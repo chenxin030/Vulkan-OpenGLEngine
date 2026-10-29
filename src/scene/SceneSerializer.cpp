@@ -1,8 +1,9 @@
-#include "SceneSerializer.h"
+﻿#include "SceneSerializer.h"
 
 #include "Scene.h"
 #include "scene/Components.h"
 #include "scene/ModelImporter.h"
+#include "industrial/IndustrialSystem.h"
 
 #include <nlohmann/json.hpp>
 
@@ -14,7 +15,7 @@
 
 namespace {
 using Json = nlohmann::json;
-constexpr int kSceneVersion = 3; // Save/Load 只支持当前格式，不保留旧版本迁移分支。
+constexpr int kSceneVersion = 4; // Save/Load 只支持当前格式，不保留旧版本迁移分支。
 
 std::string PathUtf8(const std::filesystem::path& path)
 {
@@ -32,7 +33,7 @@ uint32_t ReadIndex(const Json& value)
 }
 
 constexpr std::array<const char*, MeshLibrary::kBuiltinCount> kBuiltinNames{
-    "cube", "pyramid", "plane", "cylinder", "quad"
+    "cube", "pyramid", "plane", "cylinder"
 };
 
 const ModelAsset& AssetById(const Scene& scene, const std::string& id)
@@ -158,8 +159,14 @@ glm::mat4 ReadMatrix(const Json& value)
 
 void SceneSerializer::Save(const Scene& scene, const std::filesystem::path& path)
 {
+    if (scene.industrialRuntimeOnly) 
+        throw std::runtime_error("Cannot save industrial runtime entities; save the edit scene");
     Json root;
     root["version"] = kSceneVersion;
+    ValidateSceneSystems(scene.systems);
+    root["systems"] = Json::array();
+    for (auto kind : scene.systems) root["systems"].push_back(SceneSystemName(kind));
+    ValidateIndustrialRules(scene);
     ValidateEnvironmentSettings(scene.environment);
     if (!scene.environment.sourcePath.empty()) {
         const auto source = std::filesystem::absolute(PathFromUtf8(scene.environment.sourcePath));
@@ -213,12 +220,17 @@ void SceneSerializer::Save(const Scene& scene, const std::filesystem::path& path
             item["mesh"] = MeshReference(scene, mesh->meshIndex);
             item["material"] = MaterialReference(scene, mesh->materialIndex);
         }
-        if (const SpriteRenderer* sprite = scene.registry.TryGet<SpriteRenderer>(entity))
-            item["sprite"] = {{"tint", Vec3(sprite->tint)}};
         if (const Spin* spin = scene.registry.TryGet<Spin>(entity))
             item["spin"] = {{"axis", Vec3(spin->axis)}, {"speed", spin->speed}, {"angle", spin->angle}};
         if (const Bob* bob = scene.registry.TryGet<Bob>(entity))
             item["bob"] = {{"amplitude", bob->amplitude}, {"speed", bob->speed}, {"phase", bob->phase}};
+        if (const auto* m = scene.registry.TryGet<MachineMotion>(entity))
+            item["machineMotion"] = {{"kind",m->kind},{"axis",Vec3(m->axis)},
+                {"amplitude",m->amplitude},{"speed",m->speed},{"phase",m->phase}};
+        if (const auto* c = scene.registry.TryGet<CargoRoute>(entity))
+            item["cargoRoute"] = {{"target",c->target.index},{"asset",c->assetId},
+                {"capacity",c->capacity},{"speed",c->speed},{"interval",c->interval},
+                {"scale",c->scale},{"altitude",c->altitude}};
         root["entities"].push_back(std::move(item));
     });
 
@@ -241,9 +253,9 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
     Json root;
     file >> root;
     // 先检查整体格式；后面 at/get 会继续检查必需字段是否存在、类型是否正确。
-    // 当前只接受 v3：资产身份 + 源子资源引用。保留 version 字段，以免把其他格式误读为当前格式。
+    // 资产身份 + 源子资源引用。保留 version 字段，以免把其他格式误读为当前格式。
     if (!root.is_object() || root.value("version", 0) != kSceneVersion)
-        throw std::runtime_error("unsupported scene version; only version 3 is supported");
+        throw std::runtime_error("unsupported scene version; only version 4 is supported");
     if (!root.contains("entities") ||
         !root["entities"].is_array() || !root.contains("camera"))
         throw std::runtime_error("unsupported or malformed scene file");
@@ -251,7 +263,11 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
     // 第一阶段：准备资源库和模型模板。Scene 构造时已有内置网格及引擎默认材质。
     // 此处不调用 Import/InstantiateAsset；实例 Entity 必须按下面的 entities 数据恢复，避免重复创建。
     Scene scene;
-    // v3 可选字段；旧 v3 场景没有环境时保持关闭。源内容变化允许重新烘焙。
+    if (!root.contains("systems") || !root.at("systems").is_array())
+        throw std::runtime_error("scene systems must be an array");
+    for (const auto& name : root.at("systems"))
+        scene.systems.push_back(ParseSceneSystem(name.get<std::string>()));
+    ValidateSceneSystems(scene.systems);
     if (root.contains("environment")) {
         const auto& env = root.at("environment");
         scene.environment.sourcePath = env.at("path").get<std::string>();
@@ -304,6 +320,7 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
     // 第三阶段：恢复 Entity 及 Component 。磁盘 ID 只是文件内关联键，不是可以直接复用的 Entity 句柄。
     std::unordered_map<uint32_t, Entity> entityMap; // 文件中的 Entity  ID → 新 Registry 创建的 Entity。
     std::vector<std::pair<Entity, uint32_t>> pendingParents; // 新子 Entity  + 文件中的父 ID，稍后统一关联。
+    std::vector<std::pair<Entity, uint32_t>> pendingRoutes;
     for (const Json& item : root.at("entities")) {
         if (!item.is_object()) throw std::runtime_error("scene entity must be an object");
         const Entity entity = scene.registry.Create();
@@ -330,11 +347,6 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
             scene.registry.Add<MeshRenderer>(entity, MeshRenderer{ index, material });
         }
         // 按文件中实际存在的字段添加 Component ，不要求每个 Entity 都具备所有 Component 。
-        if (item.contains("sprite")) {
-            SpriteRenderer sprite;
-            sprite.tint = ReadVec3(item.at("sprite").at("tint"), "sprite.tint");
-            scene.registry.Add<SpriteRenderer>(entity, sprite);
-        }
         // 动画 Component 同时恢复参数与已保存的 angle/phase，让系统能够继续更新。
         if (item.contains("spin")) {
             const Json& data = item.at("spin");
@@ -345,6 +357,19 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
             const Json& data = item.at("bob");
             scene.registry.Add<Bob>(entity, Bob{ data.at("amplitude").get<float>(),
                 data.at("speed").get<float>(), data.at("phase").get<float>() });
+        }
+        if (item.contains("machineMotion")) {
+            const auto& m = item.at("machineMotion");
+            scene.registry.Add<MachineMotion>(entity, MachineMotion{m.at("kind").get<int>(),
+                ReadVec3(m.at("axis"),"machineMotion.axis"),m.at("amplitude").get<float>(),
+                m.at("speed").get<float>(),m.at("phase").get<float>()});
+        }
+        if (item.contains("cargoRoute")) {
+            const auto& c = item.at("cargoRoute");
+            scene.registry.Add<CargoRoute>(entity,CargoRoute{{},c.at("asset").get<std::string>(),
+                ReadIndex(c.at("capacity")),c.at("speed").get<float>(),c.at("interval").get<float>(),
+                c.at("scale").get<float>(),c.at("altitude").get<float>()});
+            pendingRoutes.emplace_back(entity,ReadIndex(c.at("target")));
         }
     }
     // 第四阶段：所有 Entity 已经创建，利用 ID 映射把文件中的父子关系转换成新 Entity 句柄。
@@ -367,6 +392,12 @@ Scene SceneSerializer::Load(const std::filesystem::path& path)
             current = parent->entity;
         }
     }
+    for (auto [entity, savedTarget] : pendingRoutes) {
+        const auto found = entityMap.find(savedTarget);
+        if (found == entityMap.end()) throw std::runtime_error("Cargo route target does not exist");
+        scene.registry.TryGet<CargoRoute>(entity)->target = found->second;
+    }
+    ValidateIndustrialRules(scene);
     // 资源、 Entity 和层级均恢复并通过检查后，才把完整场景交给调用者。
     return scene;
 }

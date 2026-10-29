@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -7,12 +7,11 @@
 #include <string>
 #include <vector>
 
-// 环境是场景级光照，不是模型材质。这里只描述 CPU 数据，不含任何图形 API 句柄。
 struct EnvironmentSettings
 {
     std::string sourcePath;
-    bool enabled = false;
-    bool background = false;
+    bool enabled = false;   // 是否影响场景
+    bool background = false;    // 是否作为背景看得见
     float intensity = 1.0f;
 };
 
@@ -53,7 +52,6 @@ struct EnvironmentLoadResult
     std::filesystem::path environmentCachePath, lutCachePath;
 };
 
-// 这两项公开是为了检验约定和积分，不要求阅读图片格式解析。
 glm::vec3 CubeDirection(uint32_t face, float u, float v);
 glm::vec3 SamplePanorama(const FloatMip& panorama, glm::vec3 direction);
 EnvironmentData BakeEnvironment(const FloatMip& panorama, const EnvironmentBakeOptions& options);

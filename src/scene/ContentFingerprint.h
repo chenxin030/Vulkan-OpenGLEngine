@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <bit>
@@ -6,7 +6,6 @@
 #include <span>
 #include <string>
 
-// 流式 SHA-256；导入器只喂实际读取的字节，不包含绝对路径或时间戳。
 class ContentFingerprint
 {
 public:

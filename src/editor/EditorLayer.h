@@ -1,14 +1,16 @@
-#pragma once
+﻿#pragma once
 
 #include "core/Layer.h"
 #include "editor/Editor.h"
 #include "scene/CameraController.h"
-#include "scene/SceneUpdater.h"
+#include "scene/SceneRuntime.h"
+#include <memory>
 
-// 编辑会话的所有者；Application 不知道 Registry、Play 或场景加载规则。
 class EditorLayer : public Layer
 {
 public:
+    explicit EditorLayer(std::filesystem::path initialScene)
+        : m_initialScene(std::move(initialScene)) {}
     void OnAttach() override;
     void OnDetach() noexcept override;
     void OnEvent(Event& event) override;
@@ -17,10 +19,13 @@ public:
     void OnFrameEnd() override;
     EditorInputCapture InputCapture() const override { return m_editor.InputCapture(); }
 private:
-    std::optional<Scene> m_editScene;
-    std::optional<Scene> m_runtimeScene;
-    SceneUpdater m_editUpdater;
-    SceneUpdater m_runtimeUpdater;
+    Scene& ActiveScene();
+
     CameraController m_cameraController;
     Editor m_editor;
+
+    std::filesystem::path m_initialScene;
+    std::optional<Scene> m_editScene;
+    std::optional<Scene> m_runtimeScene;
+    std::unique_ptr<SceneRuntime> m_runtime;
 };

@@ -17,7 +17,6 @@
 namespace
 {
 constexpr float pi = 3.14159265358979323846f;
-// 修改积分/方向/布局时递增。版本仅用于缓存，不是场景资源版本锁定。
 constexpr uint32_t bakeVersion = 1;
 constexpr size_t maxFileBytes = 256u * 1024u * 1024u;
 

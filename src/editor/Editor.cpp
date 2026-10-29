@@ -5,7 +5,6 @@
 #include "scene/Scene.h"
 #include "scene/SceneSerializer.h"
 #include "scene/ModelImporter.h"
-#include "scene/RenderSnapshot.h"
 #include "platform/FileDialogs.h"
 
 #include <imgui.h>
@@ -14,15 +13,19 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdint>
 #include <exception>
 #include <filesystem>
-#include <vector>
 #include <cstring>
 
 namespace {
+
+void CancelSceneGizmo()
+{
+    ImGuizmo::PushID("Scene transform");
+    ImGuizmo::Enable(false);
+    ImGuizmo::PopID();
+}
 
 std::filesystem::path ResolveEditorPath(const char* text)
 {
@@ -45,24 +48,10 @@ std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool
     hovered = false; focused = false; gizmoCaptured = false;
     if (!ImGui::Begin("Scene View")) {
         request.visible = false; rect = {}; cameraGesture = false;
-        ImGuizmo::PushID("Scene transform");
-        ImGuizmo::Enable(false);
-        ImGuizmo::PopID();
+        CancelSceneGizmo();
         ImGui::End(); return {};
     }
     ImGui::Text("Target: %u x %u pixels", image.extent.width, image.extent.height);
-    // 在视口上下文中保持 scene 参数，这样它的状态就可以保持可见
-    // 同时不会在这个共享编辑器中引入特定渲染器的依赖。
-    std::size_t drawItemCount = 0, skippedTransforms = 0;
-    scene.registry.ForEachEntity([&](Entity entity) {
-        const Transform* transform = scene.registry.TryGet<Transform>(entity);
-        if (transform && (scene.registry.Has<MeshRenderer>(entity) || scene.registry.Has<SpriteRenderer>(entity))) {
-            if (IsRenderableTransform(transform->world)) ++drawItemCount;
-            else ++skippedTransforms;
-        }
-    });
-    ImGui::SameLine();
-    ImGui::Text("Entities: %zu | Draw: %zu | Skipped: %zu", scene.registry.EntityCount(), drawItemCount, skippedTransforms);
     ImGui::TextUnformatted("Right mouse + WASD: camera | Drag model: instance");
     ImGui::BeginDisabled(playing || ImGuizmo::IsUsingAny());
     if (ImGui::RadioButton("Move", operation == 0)) operation = 0;
@@ -83,9 +72,7 @@ std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool
         {framebufferScale.x, framebufferScale.y});
     if (!request.visible || !image.Valid() || rect.size.x <= 0 || rect.size.y <= 0) {
         rect = {}; cameraGesture = false;
-        ImGuizmo::PushID("Scene transform");
-        ImGuizmo::Enable(false);
-        ImGuizmo::PopID();
+        CancelSceneGizmo();
         ImGui::End(); return {};
     }
     // Dock/resize 改变坐标时停止旧手势；不能用旧 Image 上开始的拖动修改新布局。
@@ -93,9 +80,7 @@ std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool
     previousRect = rect;
     if (geometryChanged) {
         cameraGesture = false;
-        ImGuizmo::PushID("Scene transform");
-        ImGuizmo::Enable(false);
-        ImGuizmo::PopID();
+        CancelSceneGizmo();
     }
     ImGui::SetCursorScreenPos(ImVec2(rect.min.x, rect.min.y));
     // Image 和 Dummy 一样不抢 ActiveId，因此可同时作为拖放目标及操纵轴背景。
@@ -166,7 +151,7 @@ std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool
             (ImGuizmo::IsUsing() || (hovered && ImGuizmo::IsOver(ops[operation])));
     }
     ImGuizmo::PopID();
-    if (hovered && !dragging && !cameraLook && !gizmoCaptured &&
+    if (!playing && hovered && !dragging && !cameraLook && !gizmoCaptured &&
         !ImGui::IsAnyItemActive() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         editor.Select(EditorGeometry::Pick(scene, { mouse.x - rect.min.x, mouse.y - rect.min.y },
@@ -179,24 +164,28 @@ std::optional<ProjectAssetEntry> DrawViewport(Editor& editor, Scene& scene, bool
 }
 
 void DrawHierarchy(Editor& editor, const Scene& scene, bool playing,
-    bool& createEmpty, bool& createSprite, bool& deleteEntity)
+    bool& createEmpty, bool& deleteEntity)
 {
     if (!ImGui::Begin("Scene Hierarchy")) { ImGui::End(); return; }
     ImGui::BeginDisabled(playing);
     if (ImGui::Button("Create")) ImGui::OpenPopup("CreateEntity");
     if (ImGui::BeginPopup("CreateEntity")) {
         if (ImGui::MenuItem("Empty Entity")) createEmpty = true;
-        if (ImGui::MenuItem("Sprite")) createSprite = true;
         ImGui::EndPopup();
     }
     ImGui::EndDisabled();
 
-    scene.registry.ForEachEntity([&editor, &scene, playing, &deleteEntity](Entity entity) {
+    static ImGuiTextFilter hierarchyFilter;
+    hierarchyFilter.Draw("Filter");
+    editor.ForEachDisplayed(scene, [&editor, &scene, playing, &deleteEntity](Entity entity) {
         ImGui::PushID(static_cast<int>(entity.index));
         ImGui::PushID(static_cast<int>(entity.generation));
 
         char label[160]{};
         const Name* name = scene.registry.TryGet<Name>(entity);
+        if (!hierarchyFilter.PassFilter(name ? name->value.c_str() : "Entity")) {
+            ImGui::PopID(); ImGui::PopID(); return;
+        }
         std::snprintf(label, sizeof(label), "%s%u:%u %s",
             scene.registry.TryGet<Parent>(entity) ? "  " : "",
             entity.index, entity.generation, name ? name->value.c_str() : "Entity");
@@ -223,7 +212,7 @@ void DrawHierarchy(Editor& editor, const Scene& scene, bool playing,
 }
 
 void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
-    bool& load, bool& clear, bool& demo, bool& modified)
+    bool& load, bool& clear, bool& modified)
 {
     ImGui::SeparatorText("Environment");
     ImGui::BeginDisabled(playing);
@@ -231,7 +220,6 @@ void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
     if (ImGui::Button("Load / Reload HDR")) load = true;
     ImGui::SameLine();
     if (ImGui::Button("Clear")) clear = true;
-    if (ImGui::Button("IBL demo")) demo = true;
     ImGui::BeginDisabled(!scene.environmentData);
     if (ImGui::Checkbox("IBL", &scene.environment.enabled)) modified = true;
     if (ImGui::Checkbox("Skybox", &scene.environment.background)) modified = true;
@@ -248,14 +236,14 @@ void DrawEnvironment(Scene& scene, bool playing, char* path, size_t pathSize,
 }
 
 void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_t pathSize,
-    bool& load, bool& clear, bool& demo, bool& modified)
+    bool& load, bool& clear, bool& modified)
 {
     ImGui::Begin("Inspector");
 
     const Entity selected = editor.SelectedEntity();
     if (!editor.HasSelection() || !scene.registry.IsAlive(selected)) {
         ImGui::TextUnformatted("Select an entity.");
-        DrawEnvironment(scene, playing, path, pathSize, load, clear, demo, modified);
+        DrawEnvironment(scene, playing, path, pathSize, load, clear, modified);
         ImGui::End();
         return;
     }
@@ -299,12 +287,6 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
         ImGui::Text("Mesh index: %u", mesh->meshIndex);
     }
 
-    if (SpriteRenderer* sprite = scene.registry.TryGet<SpriteRenderer>(selected)) {
-        ImGui::SeparatorText("Sprite Renderer");
-        if (!playing) { if (ImGui::ColorEdit3("Tint", &sprite->tint.x)) modified = true; }
-        else ImGui::Text("Tint: %.2f, %.2f, %.2f", sprite->tint.x, sprite->tint.y, sprite->tint.z);
-    }
-
     if (const Spin* spin = scene.registry.TryGet<Spin>(selected)) {
         ImGui::SeparatorText("Spin");
         ImGui::Text("Speed: %.2f rad/s", spin->speed);
@@ -316,7 +298,7 @@ void DrawInspector(Editor& editor, Scene& scene, bool playing, char* path, size_
         ImGui::Text("Speed: %.2f rad/s", bob->speed);
     }
 
-    DrawEnvironment(scene, playing, path, pathSize, load, clear, demo, modified);
+    DrawEnvironment(scene, playing, path, pathSize, load, clear, modified);
     ImGui::End();
 }
 
@@ -328,7 +310,7 @@ void Editor::InitializeLayout()
     m_assets.Initialize(std::filesystem::path(u8"" ASSET_DIR));
 }
 
-void Editor::DrawMenu(bool playing)
+void Editor::DrawMenu(Scene& scene, bool playing)
 {
     if (!ImGui::BeginMainMenuBar()) return;
     if (ImGui::BeginMenu("File")) {
@@ -338,6 +320,34 @@ void Editor::DrawMenu(bool playing)
         ImGui::Separator();
         if (ImGui::MenuItem("Save")) m_fileCommand = FileCommand::Save;
         if (ImGui::MenuItem("Save As...")) m_fileCommand = FileCommand::SaveAs;
+        ImGui::EndDisabled();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Scene Systems")) {
+        ImGui::BeginDisabled(playing || m_document.HasPending() || !m_importSource.empty());
+        const auto contains = [&](SceneSystemKind kind) {
+            return std::find(scene.systems.begin(), scene.systems.end(), kind) != scene.systems.end();
+        };
+        bool industrial = contains(SceneSystemKind::Industrial);
+        bool animation = contains(SceneSystemKind::Animation);
+        if (ImGui::MenuItem("Industrial", nullptr, industrial)) {
+            if (industrial) std::erase(scene.systems, SceneSystemKind::Industrial);
+            else {
+                // 显式选择工业逻辑时，同时选择其依赖并维持执行顺序。
+                std::erase(scene.systems, SceneSystemKind::Animation);
+                scene.systems.push_back(SceneSystemKind::Industrial);
+                scene.systems.push_back(SceneSystemKind::Animation);
+            }
+            m_document.MarkModified();
+        }
+        industrial = contains(SceneSystemKind::Industrial);
+        animation = contains(SceneSystemKind::Animation);
+        if (ImGui::MenuItem("Animation", nullptr, animation, !industrial)) {
+            if (animation) std::erase(scene.systems, SceneSystemKind::Animation);
+            else scene.systems.push_back(SceneSystemKind::Animation);
+            m_document.MarkModified();
+        }
+        if (industrial) ImGui::TextDisabled("Industrial requires Animation after it.");
         ImGui::EndDisabled();
         ImGui::EndMenu();
     }
@@ -399,11 +409,11 @@ void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const 
         for (int button = 0; button < 5; ++button) held |= ImGui::IsMouseDown(button);
         if (!held) m_nativeInputGuard = false;
     }
-    if (!scene.registry.IsAlive(m_selectedEntity)) m_hasSelection = false;
-    DrawMenu(playing);
+    if (!scene.registry.IsAlive(m_selectedEntity)) m_selectedEntity = {};
+    DrawMenu(scene, playing);
     if (m_layout.DrawDockSpace()) {
         CancelViewportInput();
-        ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+        CancelSceneGizmo();
     }
     bool modified = false;
     if (const auto dropped = DrawViewport(*this, scene, playing, m_viewportHovered,
@@ -415,7 +425,7 @@ void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const 
             catch (const std::exception& error) { m_status = error.what(); }
         }
     }
-    DrawHierarchy(*this, scene, playing, m_requestCreateEmpty, m_requestCreate, m_requestDelete);
+    DrawHierarchy(*this, scene, playing, m_requestCreateEmpty, m_requestDelete);
     const auto actions = m_assetBrowser.Draw(m_assets, playing);
     m_requestPickImport |= actions.importModel;
     m_requestRefresh |= actions.refresh;
@@ -424,7 +434,7 @@ void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const 
         catch (const std::exception& error) { m_status = error.what(); }
     }
     DrawInspector(*this, scene, playing, m_environmentPath, sizeof(m_environmentPath),
-        m_requestEnvironment, m_requestClearEnvironment, m_requestIblDemo, modified);
+        m_requestEnvironment, m_requestClearEnvironment, modified);
     if (modified && !playing) m_document.MarkModified();
     DrawDocumentDialogs();
 }
@@ -432,7 +442,7 @@ void Editor::Draw(Scene& scene, bool playing, const ViewportImage& image, const 
 void Editor::BeforeFileDialog()
 {
     CancelViewportInput();
-    ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+    CancelSceneGizmo();
     m_pauseAfterDialog = true;
     m_nativeInputGuard = true;
 }
@@ -451,13 +461,12 @@ void Editor::RefreshAssets()
 }
 void Editor::SceneChanged(const Scene& scene)
 {
-    m_hasSelection = false;
+    m_selectedEntity = {};
     // 旧流程：资产 ID 属于原 Scene，换场景后清除旧请求。现在传项目路径，仍取消旧操作。
     m_requestInstance.reset();
-    m_sceneChanged = true;
     m_pauseAfterDialog = true; // 新场景不推进同步加载期间的墙钟时间。
     CancelViewportInput();
-    ImGuizmo::PushID("Scene transform"); ImGuizmo::Enable(false); ImGuizmo::PopID();
+    CancelSceneGizmo();
     std::snprintf(m_environmentPath, sizeof(m_environmentPath), "%s", scene.environment.sourcePath.c_str());
     if (!m_document.Path().empty()) m_assetBrowser.Reveal(m_assets, m_document.Path());
 }
@@ -468,20 +477,19 @@ void Editor::ApplyPending(Scene& editScene, std::optional<Scene>& runtimeScene)
         if (m_requestStop) runtimeScene.reset();
         if (m_requestRefresh) { m_status = "Assets refreshed"; RefreshAssets(); }
         if (!runtimeScene) {
-            if (m_requestCreate || m_requestCreateEmpty) {
+            if (m_requestCreateEmpty) {
                 Entity entity = editScene.registry.Create();
                 Transform transform;
                 transform.local = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f));
                 transform.world = transform.local;
                 editScene.registry.Add<Transform>(entity, transform);
-                editScene.registry.Add<Name>(entity, Name{m_requestCreate ? "Sprite" : "Entity"});
-                if (m_requestCreate) editScene.registry.Add<SpriteRenderer>(entity);
+                editScene.registry.Add<Name>(entity, Name{"Entity"});
                 Select(entity); m_document.MarkModified();
-                m_status = m_requestCreate ? "Sprite created" : "Entity created";
+                m_status = "Entity created";
             }
-            if (m_requestDelete && m_hasSelection && editScene.registry.IsAlive(m_selectedEntity)) {
+            if (m_requestDelete && HasSelection() && editScene.registry.IsAlive(m_selectedEntity)) {
                 editScene.DestroyEntitySubtree(m_selectedEntity);
-                m_hasSelection = false; m_document.MarkModified(); m_status = "Entity deleted";
+                m_selectedEntity = {}; m_document.MarkModified(); m_status = "Entity deleted";
             }
             if (m_requestEnvironment) {
                 const auto source = ResolveEditorPath(m_environmentPath);
@@ -527,7 +535,6 @@ void Editor::ApplyPending(Scene& editScene, std::optional<Scene>& runtimeScene)
                 m_status = "Model imported into project";
                 RefreshAssets(); m_assetBrowser.Reveal(m_assets, imported);
             }
-            if (m_requestIblDemo) m_document.RequestOpen(m_assets.Root() / "phase8-ibl.scene.json");
             if (m_fileCommand == FileCommand::New) m_document.RequestNew();
             if (m_fileCommand == FileCommand::Open) {
                 BeforeFileDialog();
@@ -556,24 +563,13 @@ void Editor::ApplyPending(Scene& editScene, std::optional<Scene>& runtimeScene)
         // 导入失败关闭命名框，下一次 Import 可重新选择；候选目录由 ProjectAssets 回收。
         if (m_requestImport) m_importSource.clear();
     }
-    m_requestCreate = m_requestCreateEmpty = m_requestDelete = m_requestPlay = m_requestStop = false;
+    m_requestCreateEmpty = m_requestDelete = m_requestPlay = m_requestStop = false;
     m_requestImport = m_requestPickImport = m_requestRefresh = false;
-    m_requestEnvironment = m_requestClearEnvironment = m_requestIblDemo = false;
+    m_requestEnvironment = m_requestClearEnvironment = false;
     m_fileCommand = FileCommand::None;
     m_requestInstance.reset();
 }
 
-
-Scene& Editor::ActiveScene(Scene& editScene, std::optional<Scene>& runtimeScene)
-{
-    // 放在 Editor 中，是为了把“编辑 / Play 场景切换”的规则与 ApplyPending 放在一起：
-    // Play 时 ApplyPending 复制 editScene 到 runtimeScene，Stop 时销毁运行副本。
-    // 主循环通过这里取得当前场景，供相机、系统更新、渲染和编辑器 UI 使用。
-    // 两份 Scene 实际由 EditorLayer 持有；本方法返回引用，不复制场景，也不改变播放状态。
-    // 这里没有读取 Editor 成员，因此它并非必须是成员方法，也可以是静态或自由函数。
-    // 当前只是按职责归组；以后若 play 生命周期变复杂，可交给专门的应用/ play 控制器。
-    return runtimeScene ? *runtimeScene : editScene;
-}
 
 EditorInputCapture Editor::InputCapture() const
 {
@@ -604,7 +600,7 @@ InputState Editor::CameraInput(InputState input)
 
 bool Editor::HasSelection() const
 {
-    return m_hasSelection;
+    return m_selectedEntity.IsValid();
 }
 
 Entity Editor::SelectedEntity() const
@@ -615,5 +611,4 @@ Entity Editor::SelectedEntity() const
 void Editor::Select(Entity entity)
 {
     m_selectedEntity = entity;
-    m_hasSelection = entity.IsValid();
 }

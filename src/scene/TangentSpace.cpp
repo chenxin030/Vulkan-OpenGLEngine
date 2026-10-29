@@ -1,4 +1,4 @@
-#include "TangentSpace.h"
+﻿#include "TangentSpace.h"
 #include "../../third_party/MikkTSpace/mikktspace.h"
 #include <array>
 #include <bit>
@@ -11,8 +11,6 @@
 namespace {
 bool Finite(glm::vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 
-// 相对面积判断避免把毫米级合法三角形当退化面；double 中间值避免长度平方下溢。
-// 返回单位面法线。只检查几何，不改变输入；用于平面法线与生成切线的准备阶段。
 glm::vec3 FaceNormal(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
     const glm::dvec3 e1=glm::dvec3(b)-glm::dvec3(a), e2=glm::dvec3(c)-glm::dvec3(a);
     const glm::dvec3 n=glm::cross(e1,e2);
@@ -23,7 +21,6 @@ glm::vec3 FaceNormal(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
     return glm::vec3(glm::normalize(n));
 }
 
-// 以原顶点和基底的浮点位模式为键。不会合并属性不同的顶点，也不平均镜像手性。
 using Key = std::array<uint32_t, 5>;
 Key BasisKey(uint32_t source, glm::vec4 basis) {
     return { source, std::bit_cast<uint32_t>(basis.x), std::bit_cast<uint32_t>(basis.y),
@@ -47,7 +44,6 @@ void CheckTopology(const MeshData& mesh) {
 }
 
 struct MikkInput { const MeshData& mesh; std::vector<glm::vec4> corners; };
-// Mikk 回调只适配现有索引网格；face/corner 表示三角形编号/角点编号。
 MikkInput& Input(const SMikkTSpaceContext* c) { return *static_cast<MikkInput*>(c->m_pUserData); }
 const Vertex& Corner(const SMikkTSpaceContext* c, int face, int corner) {
     const auto& m = Input(c).mesh;

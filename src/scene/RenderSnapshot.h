@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <span>
+#include "scene/Entity.h"
 
 struct DrawItem
 {
@@ -20,7 +22,6 @@ struct DrawItem
     float metallicFactor = 0.0f;
     float roughnessFactor = 1.0f;
     glm::vec3 emissive{ 0.0f };
-    bool unlit = false;
     uint32_t materialIndex = 0;
     uint32_t normalTextureIndex = 0xFFFFFFFFu;
     float normalScale = 1.0f;
@@ -46,7 +47,4 @@ struct RenderSnapshot
 };
 
 RenderSnapshot BuildRenderSnapshot(const struct Scene& scene);
-
-// FP32 检查矩阵的 16 个数是否都是普通有限数值。且法线逆转置可计算。RenderSnapshot/UI 共用该方法；
-// 失败只跳过 draw，不改 ECS 变换。极小缩放导致数值下溢也视为不可绘制。
-bool IsRenderableTransform(const glm::mat4& world);
+RenderSnapshot BuildRenderSnapshot(const struct Scene& scene, std::span<const Entity> entities);

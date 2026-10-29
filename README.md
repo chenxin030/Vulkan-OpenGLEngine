@@ -1,118 +1,65 @@
-# engine-rebuild
+# 基于 Vulkan / OpenGL 的三维渲染引擎
 
-**这是练习工程，不是作品集。**
+使用 C++20 实现的小型三维引擎，包含双图形后端、PBR 渲染、场景编辑器、Archetype ECS 和独立 Player。工业场景将模型资源、层级动画、对象池与场景持久化串成完整的编辑和运行流程。
 
-从零重写 mini 引擎的核心。参照 `game-engine-portfolio`，但**先自己写**，卡住了才回去看它。
+项目正式名称为“基于 Vulkan / OpenGL 的三维渲染引擎”，CMake 项目及构建目标为 `VulkanOpenGLEngine`，生成程序为 `VulkanOpenGLEngine.exe`。
 
----
+## 项目要点
 
-## 为什么它在这里，而不在 portfolio 仓库里
+- **Vulkan / OpenGL 双后端**：通过统一 Renderer 接口消费场景快照，各自管理 GPU 资源、绘制和同步；同一场景可切换后端运行。
+- **完整的离屏渲染流程**：方向光阴影、金属度/粗糙度 PBR、HDR、IBL、法线贴图、MSAA 和色调映射，最终将 LDR 图像显示在编辑器视口中。默认请求 4× MSAA，根据设备能力回退。
+- **Archetype ECS**：以固定容量 Chunk 和按列组件存储组织数据，使用 index/generation 实体句柄，支持实体增删和组件迁移。
+- **显式系统组合与固定步长**：场景通过 `systems` 清单选择运行逻辑，统一以固定 60 Hz 推进模拟；编辑器 Play 和独立 Player 复用 SceneRuntime。
+-  **可编辑、可保存、可运行的场景**：提供 Assets、Hierarchy、Inspector、拾取和操纵轴，支持模型拖入、父子层级、场景保存与 Play / Stop。Play 使用编辑场景的副本，停止后恢复编辑数据。
 
-`docs/04` 第 0 节：面试官打开 GitHub，**第一眼看的是 commit 历史**，不是代码。
-portfolio 仓库的提交历史本身就是作品集资产 —— 练习代码混进去会稀释它，而**稀释不可逆**
-（改写历史意味着强制推送）。
+## 构建方式
 
-**写得好，它是第三个作品；写得不好，删掉它，portfolio 毫发无伤。** 这是把练习和作品隔开的全部理由。
+### 环境依赖
 
-放在 workspace 目录下（而不是 `E:\Desktop\DSH\`）是因为 **DSH 沙箱只允许写工作区内的路径**。
+| 依赖                                  | 要求与用途                                                             |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| Visual Studio 2022 / Build Tools 2022 | 安装“使用 C++ 的桌面开发”工作负载及 Windows SDK，编译 C++20            |
+| CMake                                 | 3.24 或更新版本                                                        |  |
+| Vulkan SDK                            | 提供 Vulkan 头文件、库与 `glslc`；安装后确认 `VULKAN_SDK` 环境变量可用 |
+| 显卡驱动                              | 运行所选后端需要 Vulkan 或 OpenGL 4.5 支持                             |
+| GLM                                   | 单独准备头文件，目录下应包含 `glm/glm.hpp`                             |
 
----
-
-## 构建
-
-```powershell
-cd "E:\Desktop\DSH\DeepSeek Harness\engine-rebuild"
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-.\build\Debug\Rebuild.exe
-```
-
-- 第一次配置会联网拉 GLFW / ImGui / stb（**GitHub 要开代理**），之后缓存在 `build\_deps`
-- 报奇怪的错就删 `build\CMakeCache.txt` 和 `build\CMakeFiles` 再配置 —— **千万别删 `build\_deps`**
-- 贴图是**生成**的（`assets/` 已忽略），需要时手动生成一次：
-  `cmake --build build --target DemoTexture` → `assets\checkerboard.ppm`
-
----
-
-## 进度
-
-| 天 | 交付 | 状态 |
-|---|---|---|
-| **D3** | **窗口能开、能关、能拖大小** | ✔ `a7717f5` |
-| D4 | Instance + 验证层 + Debug Messenger + Surface + 物理/逻辑设备 | ✔ `a7717f5` |
-| D5 | Swapchain + ImageView + RenderPass + Framebuffer + 命令缓冲 + 同步 → **清屏色** | ✔ `7e3773b` `667291f` |
-| D6 | 三角形 + 交换链重建 + ImGui | ✔ `abc9752` `bf2298d` |
-| D11 | 顶点/索引缓冲 + staging 两段式上传 | ✔ `c65e91b` |
-| D12 | 深度缓冲 + UBO/MVP + 描述符集 | ✔ `01f1606` `12d66c5` |
-| D13 | 抽 `Renderer` 接口 + 工厂（**`main.cpp` 不再含 `vulkan`**） | ✔ `67439fc` |
-| D18 | 贴图：stb + 两次布局转换 + 采样器 | ✔ `eecad24` |
-| D19 | mip 链（含**目标层级**的 barrier）+ 各向异性 | ✔ `dd9bd9e` |
-| D25 | 多物体 + `model` 改 push constant | ✔ `b35e7ba` |
-| D26 | `Camera` + `InputState` + `GlfwInput` | ✔ `9529b2f` |
-| D27 | `CameraController` + 接进主循环（WASD 飞起来） | ✔ `9529b2f` |
-| D32 | ECS：`Entity` + `Registry` + `Components` + `Systems` | ✔ `732d810` |
-| D33 | `MeshLibrary` + `GpuMesh` + 懒惰上传 | ✔ `6dd9412` |
-| D34 | 热重载：`FileWatch` + `ReloadTexture` + 失败回退 | ✔ `abc1d69` |
-| D35 | 练习：加圆柱体 + `Bob` 与 `BobSystem`（形状 A→B） | ✔ `89cfe4a` |
-| D38 | 接 VMA + 每处主机写入后 flush | ✔ `a68d088` |
-| D41–D42 | 第二个后端（OpenGL）画出同一个场景 | ✔ `31dde49` |
-
-> 验收记录（证据、命令、判据）在 `notes\` 下，每个增量一份；`notes/` 不入库。
->
-> **收口（D36 拍板）**：做完 **D38** 与 **D41–D42** 即结题 —— 其余学习日降级为读 / 跑，
-> 省下的时间给作品集。理由与账目见 `notes\rebuild-scope.md`。
-
----
-
-## 三条纪律
-
-1. **每个增量必须编译通过再往下走。** 一次性搬两千行，编译报错会糊成一团，分不清是哪个改动引起的 ——
-   这是 mini-engine 已验证过两次的教训。
-2. **一个增量一次提交。** `030d6ab`（3 个增量、18 个文件）就是反例，它**已经无法拆分**了。
-3. **卡住了才回去看原版。** 顺序反了就等于抄 —— 而"抄"学不到任何东西。
-
----
-
-## 提交前（两条自查）
+### 配置与编译
 
 ```powershell
-git branch --show-current          # 必须输出 main；空输出 = 游离 HEAD，立刻停手
-git status --short                 # 应当只剩这次故意改的文件
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+    -DCMAKE_CXX_FLAGS="/IC:/Libraries/glm"
+
+cmake --build build --config RelWithDebInfo --target VulkanOpenGLEngine --parallel
 ```
 
-> 游离 HEAD 是**真踩过**的坑：D32–D35 的提交一度全部落在游离链上，`main` 还停在 D32 之前
-> （因为每次只看提交输出的最后两行，没看分支名）。游离链是新提交时的恢复办法：
-> `git branch -f main HEAD; git checkout main`，恢复后逐个 verify：
-> `git merge-base --is-ancestor <hash> main`。
+## 启动与使用
 
-**文件编码**：仓库对 BOM **不作要求**。VS 默认带 BOM 保存，脚本/工具写入的不带；
-两种都能编译、都能被 Obsidian 正常读取，因此**不为此翻动已有文件**（纯空白改动会搅浑历史）。
-
----
-
-## 验收命令（每个阶段都该是空的）
+### 编辑器
 
 ```powershell
-# 应用层不含任何后端头 —— 注意必须限定在 include 行
-findstr /i "#include" src\main.cpp | findstr /i "vulkan opengl"
+# 空场景，默认使用 Vulkan
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe
+
+# 打开普通场景
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe vulkan --scene assets/scenes/phase5-demo.scene.json
+
+# 使用 OpenGL 打开工业场景
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe opengl --scene assets/industrial/industrial.scene.json
 ```
 
-> 直接搜全文会被**注释**匹配到。mini-engine 的 `main.cpp:10` 就有一条注释写着这条命令本身，
-> 于是那条验证**永远通不过失败这一关** —— 一条永远"通过"的验证，等于没有验证。
+- Assets 浏览模型与场景；拖入 GLB 创建实例，打开 `.scene.json` 切换场景。
+- Hierarchy 选择、筛选实体，Inspector 和操纵轴编辑变换。导入模型的整体变换通过根实体编辑。
+- 通过 **Scene Systems** 菜单选择 Animation / Industrial；选择 Industrial 会同时启用其依赖 Animation。
+- 编辑态只更新基础父子变换；点击 Play 后执行场景系统，Stop 丢弃运行副本。工业专用的 MachineMotion / CargoRoute 属性面板已移除，规则仍支持序列化和运行。
+- 右键配合 WASD 移动相机，Q / E 升降。编辑器相机只接收视口手势，UI 输入经捕获处理；Escape 关闭程序。
 
----
+### 直接“游玩”
 
-## 卡住时去哪查
+```powershell
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe vulkan --play assets/industrial/industrial.scene.json
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe opengl --play assets/scenes/phase5-demo.scene.json
+.\build\RelWithDebInfo\VulkanOpenGLEngine.exe --help
+```
 
-| 想做的事 | 看哪 |
-|---|---|
-| 窗口 + 主循环 | `game-engine-portfolio\mini-engine\src\main.cpp` |
-| Vulkan 引导链 | `vulkan_renderer.cpp` 的 `CreateInstance` → `CreateLogicalDevice` |
-| 交换链 / RenderPass / 管线 | `CreateSwapChain` / `CreateRenderPass` / `CreateGraphicsPipeline` |
-| 贴图上传（两次布局转换） | `RecordImageTransition` / `UploadTexture` |
-| mip 链 | `RecordMipChain` |
-| ECS | `scene\Entity.h` / `Registry.{h,cpp}` / `Systems.cpp` |
-| 热重载 | `ReloadTexture` / `WriteTextureDescriptors` |
-| 逐日清单 | `portfolio-main\docs\12-reading-list.md` |
-
-**用函数名定位，不要硬套行号** —— 行号随提交漂移（`proj[1][1]` 在 `bace27c` 是 1224，在 `main` 上是 1432）。
+Player 加载场景后直接创建 Runtime，不再进入编辑器。相对场景路径以当前工作目录为起点；从其他目录启动时可传绝对路径。

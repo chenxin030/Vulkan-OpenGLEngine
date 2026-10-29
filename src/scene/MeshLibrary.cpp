@@ -222,20 +222,6 @@ namespace {
         return mesh;
     }
 
-    MeshData BuildQuad()
-    {
-        MeshData mesh;
-        mesh.vertices = {
-            Vertex{ { -0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-            Vertex{ {  0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-            Vertex{ {  0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-            Vertex{ { -0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-        };
-        mesh.indices = { 0, 1, 2, 0, 2, 3 };
-        GenerateNormals(mesh);
-        return mesh;
-    }
-
     // 圆柱：N 段侧面（每段一个四边形 = 两个三角形）+ 两个三角扇的盖子。
     //
     // 绕序的推导和四棱锥同源，但这里能看出**一般规则**：给一个面取 (u, v) 使 u x v == 该面的
@@ -345,7 +331,6 @@ MeshLibrary::MeshLibrary()
     m_meshes.push_back(BuildPyramid());
     m_meshes.push_back(BuildPlane());
     m_meshes.push_back(BuildCylinder());
-    m_meshes.push_back(BuildQuad());
 }
 
 uint32_t MeshLibrary::Append(MeshData mesh)

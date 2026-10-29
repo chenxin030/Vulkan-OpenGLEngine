@@ -1,4 +1,4 @@
-#include "platform/GlfwEvents.h"
+﻿#include "platform/GlfwEvents.h"
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <new>
@@ -34,7 +34,7 @@ GlfwEvents::GlfwEvents(GLFWwindow* window) : m_window(window)
 
 GlfwEvents::~GlfwEvents()
 {
-    // 必须在 ImGui_ImplGlfw_Shutdown 恢复应用回调之后、窗口销毁之前运行。
+    // 在 ImGui_ImplGlfw_Shutdown 恢复应用回调之后、窗口销毁之前运行。
     glfwSetWindowCloseCallback(m_window, nullptr);
     glfwSetFramebufferSizeCallback(m_window, nullptr);
     glfwSetWindowFocusCallback(m_window, nullptr);
@@ -51,6 +51,7 @@ void GlfwEvents::Record(Event event) noexcept
 
 std::vector<Event> GlfwEvents::Drain()
 {
-    if (m_recordFailed) throw std::bad_alloc();
+    if (m_recordFailed) 
+        throw std::bad_alloc();
     return std::exchange(m_events, {});
 }

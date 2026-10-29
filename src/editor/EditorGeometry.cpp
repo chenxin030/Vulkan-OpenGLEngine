@@ -97,7 +97,7 @@ Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect, c
         const Transform* transform = scene.registry.TryGet<Transform>(entity);
         if (!transform || !Finite(transform->world)) return;
         const float winding = glm::determinant(glm::mat3(transform->world)) < 0 ? -1.0f : 1.0f;
-        const auto intersect = [&](uint32_t meshIndex, bool meshFacing) {
+        const auto intersect = [&](uint32_t meshIndex) {
             if (meshIndex >= scene.meshes.Count()) return;
             const MeshData& mesh = scene.meshes.Get(meshIndex);
             for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
@@ -116,7 +116,7 @@ Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect, c
                 // 两后端主 pass 都剔除背面。世界空间检测也自然处理镜像后的绕序。
                 const float tolerance = 1e-7f * glm::length(e1) * glm::length(e2) * glm::length(segment);
                 // 阶段 9 的渲染端会为负 determinant 的实例反转 frontFace；拾取采用相同正面约定。
-                if (!std::isfinite(determinant) || determinant * (meshFacing ? winding : 1.0f) <= tolerance) continue;
+                if (!std::isfinite(determinant) || determinant * winding <= tolerance) continue;
                 const glm::vec3 delta = start - a;
                 const float u = glm::dot(delta, p) / determinant;
                 const glm::vec3 q = glm::cross(delta, e1);
@@ -128,8 +128,7 @@ Entity Pick(const Scene& scene, glm::vec2 mouse, glm::vec2 size, float aspect, c
                 }
             }
         };
-        if (const MeshRenderer* mesh = scene.registry.TryGet<MeshRenderer>(entity)) intersect(mesh->meshIndex, true);
-        if (scene.registry.Has<SpriteRenderer>(entity)) intersect(MeshLibrary::kQuad, false);
+        if (const MeshRenderer* mesh = scene.registry.TryGet<MeshRenderer>(entity)) intersect(mesh->meshIndex);
     });
     return RootEntity(scene, hit);
 }

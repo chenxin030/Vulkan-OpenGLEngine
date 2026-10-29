@@ -2,35 +2,47 @@
 #include "editor/EditorLayer.h"
 #include "rhi/Renderer.h"
 #include "rhi/RendererFactory.h"
-#include "transport/TransportLayer.h"
+#include "player/PlayerLayer.h"
+#include "industrial/IndustrialScene.h"
+#include "core/LaunchOptions.h"
+#include "scene/SceneSerializer.h"
 
 #include <cstdlib>
 #include <iostream>
-#include <string>
 
 int main(int argc, char** argv)
 {
     try {
-        const auto options = ParseTransportOptions(argc, argv);
-        const GraphicAPIType apiType =
-            (options.backend == "opengl") ? GraphicAPIType::OPENGL : GraphicAPIType::VULKAN;
+        const auto options = ParseLaunchOptions(argc, argv);
+        if (options.help) { std::cout << LaunchUsage() << std::endl; return EXIT_SUCCESS; }
+        if (!options.prepareIndustrialPath.empty()) {
+            SceneSerializer::Save(BuildIndustrialScene(options.prepareIndustrialPath), options.prepareIndustrialPath/"industrial.scene.json");
+            std::cout << "Industrial scene prepared" << std::endl;
+            return EXIT_SUCCESS;
+        }
+        const bool player = !options.playerScene.empty();
+        const GraphicAPIType apiType = (options.backend == "opengl") ? GraphicAPIType::OPENGL : GraphicAPIType::VULKAN;
         auto renderer = CreateRenderer(apiType);
-        renderer->Configure({options.enabled, options.benchmark});
-        auto* renderObserver = renderer.get();
+        renderer->ShowDiagnostics(!player);
 
         ApplicationSpecification spec;
-        if (options.enabled) { spec.width = 1280; spec.height = 720; spec.title = "Transport benchmark"; spec.pixelSizedWindow = true; }
+        if (player) { 
+            spec.width = 1280; 
+            spec.height = 720; 
+            spec.title = ProjectInfo::PlayerTitle;
+            spec.pixelSizedWindow = true; 
+        }
         
         Application application(std::move(renderer), spec);
-        bool successful = !options.benchmark;
-        if (options.enabled) application.PushLayer(std::make_unique<TransportLayer>(*renderObserver, options,
-            [&](bool success) { successful = success; application.Close(); }));
-        else application.PushLayer(std::make_unique<EditorLayer>());
+        if (player)
+            application.PushLayer(std::make_unique<PlayerLayer>(options.playerScene, options.backend));
+        else 
+            application.PushLayer(std::make_unique<EditorLayer>(options.editorScene));
 
         application.InstallImGuiOverlay();
         application.Run();
 
-        return successful ? EXIT_SUCCESS : EXIT_FAILURE;
+        return EXIT_SUCCESS;
     }
     catch (const std::exception& e) {
         std::cerr << "fatal: " << e.what() << std::endl;

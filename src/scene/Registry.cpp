@@ -1,4 +1,4 @@
-#include "scene/Registry.h"
+﻿#include "scene/Registry.h"
 #include <limits>
 
 Registry::Archetype::Archetype(std::vector<const TypeInfo*> signature) : types(std::move(signature)) {
@@ -28,9 +28,12 @@ void* Registry::Chunk::At(std::size_t column, std::size_t row) {
 const void* Registry::Chunk::At(std::size_t column, std::size_t row) const {
     return data + archetype.offsets[column] + archetype.types[column]->size * row;
 }
+
 void Registry::CheckStructuralChange() const {
-    if (m_iterations) throw std::logic_error("Registry structural changes must be deferred until traversal ends");
+    if (m_iterations) 
+        throw std::logic_error("Registry structural changes must be deferred until traversal ends");
 }
+
 Registry::Archetype& Registry::FindOrCreate(std::vector<const TypeInfo*> types) {
     std::sort(types.begin(), types.end(), [](const TypeInfo* a, const TypeInfo* b) { return a->key < b->key; });
     for (const auto& archetype : m_archetypes) if (archetype->types == types) return *archetype;
@@ -45,8 +48,7 @@ Registry::Location Registry::ReserveRow(Archetype& archetype) {
         archetype.chunks.push_back(std::make_unique<Chunk>(archetype));
     return {&archetype, archetype.firstAvailable, archetype.chunks[archetype.firstAvailable]->count};
 }
-// 原存储的“交换并弹出，O(1)，不能依赖顺序”现在作用于 Chunk 整行。
-// 补洞行 Entity 不变，但 location 必须立即回写，否则 TryGet 会读到旧行。
+
 void Registry::EraseRow(Location location) noexcept {
     auto& archetype = *location.archetype;
     auto& chunk = *archetype.chunks[location.chunk];

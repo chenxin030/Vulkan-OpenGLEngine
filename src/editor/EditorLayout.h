@@ -11,10 +11,8 @@ public:
     void Initialize(const std::filesystem::path& path);
     void DrawMenu();
     bool DrawDockSpace(); // true：本帧重建了布局，调用者需取消旧交互。
-    void RequestReset() { m_resetRequested = true; }
     void Save() noexcept;
     void SaveIfRequested() noexcept;
-    const std::string& Status() const { return m_status; }
 private:
     std::filesystem::path m_path;
     std::string m_status;

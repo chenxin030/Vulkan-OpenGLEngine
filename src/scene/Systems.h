@@ -1,14 +1,16 @@
 #pragma once
 
+#include "scene/Entity.h"
+#include <span>
+
 class Registry;
 
-// 虚函数一般无法内联，如果做成类的一个虚函数，还要再产生一次虚表间接调用的开销
-// 虚拟 system 接口可以实现运行时注册系统和动态排序，目前还不需要。
+// 以下是按实体批量执行的算法；SceneSystem 在阶段级别调度，不为每个实体调用虚函数。
 
-void SpinSystem(Registry& registry, float deltaSeconds);
+void SpinSystem(Registry& registry, std::span<const Entity> entities, float deltaSeconds);
 
+// 从 local 重算 world，包含 Spin/Bob；递归先求解父节点，不推进动画时间。
+void EvaluateAnimatedTransforms(Registry& registry, std::span<const Entity> entities, double elapsedSeconds);
+
+// 仅从 local 和父子关系重算 world，不应用或推进动画。
 void TransformSystem(Registry& registry);
-
-// 在 TransformSystem **之后**跑：它依赖 TransformSystem 的 pass 1 已经重置过 world。
-// 取绝对时间而不是 dt：浮动的相位不该被帧率影响。
-void BobSystem(Registry& registry, float elapsedSeconds);

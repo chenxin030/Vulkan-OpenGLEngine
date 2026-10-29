@@ -30,7 +30,6 @@
 // --- types ------------------------------------------------------------------
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
-typedef unsigned long long GLuint64;
 typedef int GLint;
 typedef int GLsizei;
 typedef unsigned char GLboolean;
@@ -44,9 +43,6 @@ typedef std::ptrdiff_t GLintptr;
 // --- enums ------------------------------------------------------------------
 // 只有这个后端实际命名的常量。添加一个只需一行修改；
 // 复制整个注册表就不是一行的事了。
-#define GL_TIMESTAMP 0x8E28
-#define GL_QUERY_RESULT_AVAILABLE 0x8867
-#define GL_QUERY_RESULT 0x8866
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_NO_ERROR 0
@@ -54,11 +50,18 @@ typedef std::ptrdiff_t GLintptr;
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_DEPTH_BUFFER_BIT 0x00000100
 
+#define GL_BLEND 0x0BE2
 #define GL_DEPTH_TEST 0x0B71
 #define GL_CULL_FACE 0x0B44
 #define GL_FRAMEBUFFER_SRGB 0x8DB9
 #define GL_FRAMEBUFFER 0x8D40
 #define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#define GL_MULTISAMPLE 0x809D
+#define GL_NUM_SAMPLE_COUNTS 0x9380
+#define GL_SAMPLES 0x80A9
 #define GL_DEPTH_ATTACHMENT 0x8D00
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_NONE 0
@@ -124,6 +127,9 @@ typedef std::ptrdiff_t GLintptr;
 #define GL_FUNCTION_LIST(X)                                          \
     X(glClearColor, void, (GLfloat, GLfloat, GLfloat, GLfloat))      \
     X(glClear, void, (GLbitfield))                                   \
+    X(glTexImage2DMultisample, void, (GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLboolean)) \
+    X(glGetInternalformativ, void, (GLenum, GLenum, GLenum, GLsizei, GLint*)) \
+    X(glBlitFramebuffer, void, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(glEnable, void, (GLenum))                                      \
     X(glDisable, void, (GLenum))                                     \
     X(glFrontFace, void, (GLenum))                                   \
@@ -132,11 +138,6 @@ typedef std::ptrdiff_t GLintptr;
     X(glGetIntegerv, void, (GLenum pname, GLint* data))            \
     X(glViewport, void, (GLint, GLint, GLsizei, GLsizei))            \
     X(glGetString, const unsigned char*, (GLenum))                   \
-    X(glGenQueries, void, (GLsizei, GLuint*))                       \
-    X(glDeleteQueries, void, (GLsizei, const GLuint*))               \
-    X(glQueryCounter, void, (GLuint, GLenum))                       \
-    X(glGetQueryObjectiv, void, (GLuint, GLenum, GLint*))            \
-    X(glGetQueryObjectui64v, void, (GLuint, GLenum, GLuint64*))       \
     X(glFinish, void, ())                                            \
     X(glGetError, GLenum, ())                                        \
     X(glGenBuffers, void, (GLsizei, GLuint*))                        \

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "scene/Entity.h"
 #include <algorithm>
 #include <array>
@@ -12,9 +12,6 @@
 #include <utility>
 #include <vector>
 
-// 阶段 15：同组件组合属于同一 Archetype，每个 Chunk 固定 128 行。
-// 原 Storage 的密集数组 / swap-and-pop 思路保留，但交换的是整行。
-// 旧实现及学习注释完整保存在 phase15-original 归档。单线程，遍历顺序不保证。
 class Registry {
 public:
     static constexpr std::size_t ChunkCapacity = 128;
@@ -36,8 +33,6 @@ public:
     template <typename T> void Remove(Entity entity);
     template <typename TFirst, typename... TRest, typename Fn> void ForEach(Fn&& fn);
     template <typename TFirst, typename... TRest, typename Fn> void ForEach(Fn&& fn) const;
-    // 结构变更后重新 TryGet：迁移行和补洞行的所有组件地址都可能改变。
-    // 回调可改字段/嵌套查询，禁止结构变更。Swap/move/析构不能操作正在遍历的对象。
 private:
     struct TypeInfo {
         std::type_index key;
@@ -116,12 +111,15 @@ private:
 template <typename Fn> void Registry::ForEachEntity(Fn&& fn) const {
     Iteration iteration(*this);
     for (std::size_t index = 0; index < m_slots.size(); ++index)
-        if (m_slots[index].alive) fn(Entity{static_cast<uint32_t>(index), m_slots[index].generation});
+        if (m_slots[index].alive) 
+            fn(Entity{static_cast<uint32_t>(index), m_slots[index].generation});
 }
 template <typename T, typename... Args> T& Registry::Add(Entity entity, Args&&... args) {
     CheckStructuralChange();
-    if (!IsAlive(entity)) throw std::runtime_error("Registry::Add called with a dead or invalid entity");
-    if (Has<T>(entity)) throw std::runtime_error("Registry::Add called for a component the entity already has");
+    if (!IsAlive(entity)) 
+        throw std::runtime_error("Registry::Add called with a dead or invalid entity");
+    if (Has<T>(entity)) 
+        throw std::runtime_error("Registry::Add called for a component the entity already has");
     // 先构造候选，允许参数引用当前组件；构造失败时原行完全不变。
     T value(std::forward<Args>(args)...);
     auto types = m_slots[entity.index].location.archetype->types;
@@ -135,15 +133,18 @@ template <typename T> T* Registry::TryGet(Entity entity) {
     return const_cast<T*>(std::as_const(*this).TryGet<T>(entity));
 }
 template <typename T> const T* Registry::TryGet(Entity entity) const {
-    if (!IsAlive(entity)) return nullptr;
+    if (!IsAlive(entity)) 
+        return nullptr;
     const auto& location = m_slots[entity.index].location;
     const auto column = location.archetype->Column(typeid(T));
-    if (column == location.archetype->types.size()) return nullptr;
+    if (column == location.archetype->types.size()) 
+        return nullptr;
     return static_cast<const T*>(location.archetype->chunks[location.chunk]->At(column, location.row));
 }
 template <typename T> void Registry::Remove(Entity entity) {
     CheckStructuralChange();
-    if (!Has<T>(entity)) return; // generation 检查防止陈旧句柄伤到新占用者。
+    if (!Has<T>(entity)) 
+        return;
     auto types = m_slots[entity.index].location.archetype->types;
     std::erase_if(types, [](const TypeInfo* type) { return type->key == typeid(T); });
     auto& target = FindOrCreate(std::move(types));
